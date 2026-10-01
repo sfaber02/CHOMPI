@@ -7,3 +7,7 @@ Icon?
 # Editor state
 .cortex-debug.*.state.json
 .vs/
+
+# Firmware build output. The vendored libs/*/build archives ARE tracked
+# upstream (they ship prebuilt); these are per-application compile outputs.
+firmware/*/code/src/build/

@@ -1,5 +1,28 @@
 # CHOMPI — Open Source
 
+> ### This fork adds a multi-firmware launcher
+>
+> Run TAPE, TEMPO and WAVE from **one SD card**. Power on and CHOMPI lights one
+> key per firmware — press a key, that firmware starts. Power cycle to come
+> back to the picker.
+>
+> No bootloader modification, and nothing is ever written to the processor's
+> internal flash. It installs like any ordinary firmware update, and swapping
+> back to a stock card returns you to normal.
+>
+> - **[Download a ready-to-use card image](../../releases/latest)** — unzip to a FAT32 card and go
+> - [`firmware/chompi-launcher`](firmware/chompi-launcher/) — source, and how it works
+>
+> The three stock firmwares here are patched to keep their samples and settings
+> in their own folder (`/TAPE`, `/TEMPO`, `/WAVE`) instead of the card root, so
+> they can share a card. Each falls back to the root if its folder is missing,
+> so the binaries still work on a stock single-firmware card.
+>
+> A community modification. Not an official CHOMPI Club release — everything
+> below is their original README.
+
+---
+
 **CHOMPI** is a quirky chromatic sampler and tape-music instrument by
 [CHOMPI Club](https://www.chompiclub.com).
 
@@ -11,6 +34,7 @@ This repo contains all of the production files, both hardware and firmware, that
 
 | | |
 |---|---|
+| [`firmware/chompi-launcher`](firmware/chompi-launcher/) | **Added by this fork.** A launcher that boots any of the firmwares in `/FIRMWARE` from a key press, plus `make-card.sh` to build the card. |
 | [**Firmware — Start Here**](firmware/README.md) | Quick instructions for setting up your development environment, building the firmware, and loading it onto your CHOMPI. |
 | [`firmware/chompi-wave`](firmware/chompi-wave/) | **WAVE 1.0**, a wavetable synth firmware that doubles as a starting point for anyone writing their own firmware. |
 | [`firmware/chompi-tempo`](firmware/chompi-tempo/) | **TEMPO 1.0**, a pattern generator firmware — the counterpart to TAPE. |

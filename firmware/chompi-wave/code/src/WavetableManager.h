@@ -152,12 +152,34 @@ class wavetableLoader {
         loadNamesFromSD();
     }
 
+    /** Wavetables live here when the card carries more than one firmware.
+     *
+     *  This scan takes the first kMaxPreload .wav files it finds, sorted. On a
+     *  card shared with TAPE that means the first seven of its 168 cubbi_/jammi_
+     *  samples, which are not wavetables, and WAVE comes up silent. Keeping the
+     *  wavetables in their own directory removes the clash entirely instead of
+     *  relying on filenames that happen to sort first.
+     *
+     *  Falls back to the root when the directory is absent, so a stock
+     *  single-firmware card still works unchanged. */
+    static constexpr const char *kWavetableDir = "/WAVE";
+
     void loadNamesFromSD() {
         DIR dir;
         FILINFO fno;
         FRESULT res;
 
-        res = f_opendir(&dir, "/");
+        // Prefer /WAVE; fall back to the root for stock cards.
+        const char *scan_dir = kWavetableDir;
+        bool in_subdir = true;
+
+        res = f_opendir(&dir, scan_dir);
+        if (res != FR_OK) {
+            scan_dir = "/";
+            in_subdir = false;
+            res = f_opendir(&dir, scan_dir);
+        }
+
         if (res == FR_OK) {
             while (true) {
                 res = f_readdir(&dir, &fno);
@@ -166,7 +188,13 @@ class wavetableLoader {
                 }
 
                 if (strstr(fno.fname, ".wav") && fno.fname[0] != '.') {//Because we love Mac users :)
-                    wavetable_names.push_back(fno.fname);
+                    // Store the path the loader will actually open, so the
+                    // sort order and the open stay consistent.
+                    if (in_subdir) {
+                        wavetable_names.push_back(std::string(kWavetableDir) + "/" + fno.fname);
+                    } else {
+                        wavetable_names.push_back(fno.fname);
+                    }
                 }
             }
             f_closedir(&dir);

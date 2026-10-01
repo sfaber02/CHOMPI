@@ -339,6 +339,12 @@ int main(void)
     System::Delay(100);
     f_mount(&fsi.GetSDFileSystem(), fsi.GetSDPath(), 1);
 
+    /* Keep WAVE's files out of the card root. options.json and presets.json
+     *  are opened relatively, so this moves them into /WAVE alongside the
+     *  wavetables. If /WAVE is absent we stay in the root, so a stock card
+     *  still works. */
+    f_chdir("/WAVE");
+
     wtLoader.Init(&fsi.GetSDFileSystem(), wavetableMemory, hw.seed.AudioSampleRate());
 
     // delete the battery log if it exists

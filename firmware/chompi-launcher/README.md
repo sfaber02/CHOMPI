@@ -23,8 +23,7 @@ The launcher is an ordinary app living in QSPI. On boot it:
 2. Lights the white key under each one and waits for a press.
 3. Reads the chosen image into SDRAM (64MB available; an image is ~250KB).
 4. Validates the image's vector table before committing to it.
-5. Swaps that firmware's `options.json` / `presets.json` into the card root.
-6. Tears down the peripherals, then resets into the chosen firmware.
+5. Tears down the peripherals, then resets into the chosen firmware.
 
 The handover is the delicate part, and it is worth explaining why it looks
 the way it does.
@@ -71,39 +70,58 @@ therefore invisible to it, and the launcher in the root is the only thing it
 ever installs. QSPI keeps holding the launcher no matter which firmware last
 ran, so every power-on returns to the picker.
 
-## Per-firmware settings
+## One folder per firmware
 
-All three stock firmwares keep `options.json` and `presets.json` in the card
-root, in three incompatible formats. Left alone they would overwrite each other
-on every switch. The launcher owns those files instead: each firmware's pair is
-parked in `/FIRMWARE` as `<stem>.options.json` / `<stem>.presets.json`, copied
-into the root just before that firmware starts, and harvested back on the next
-boot. `/FIRMWARE/last.txt` records whose settings are currently in the root.
+Stock firmwares keep everything in the card root: TAPE's 168 samples, WAVE's
+wavetables, and all three firmwares' `options.json` and `presets.json` in three
+mutually incompatible formats. On a shared card that is a contested namespace,
+and a *mutable* one — TAPE also writes there while sampling.
 
-This means **settings are only saved when you boot back into the launcher.**
-Pulling the card without a power cycle loses whatever the running firmware
-wrote.
+It breaks in practice. WAVE scans the root for `.wav`, sorts, and preloads the
+first seven; next to TAPE's samples it loads drum hits as wavetables and comes
+up silent.
+
+So each firmware now moves into its own folder at startup, immediately after
+mounting:
+
+```c
+f_chdir("/TAPE");     // or /TEMPO, /WAVE
+```
+
+Every path TAPE opens was already relative, so that one call relocates its
+samples, its settings, and the files it writes while sampling (`temp_rec.wav`,
+`looper.wav`, `chompi_xy.wav`). TEMPO needed its `Chromatic` / `Slice` /
+`Buffer` literals made relative too, including the ones it writes to. WAVE
+needed the `chdir` plus the scan directory.
+
+**Each falls back to the root when its folder is absent**, so these binaries
+still work unchanged on a stock single-firmware card.
+
+Settings therefore need no management: each firmware reads and writes its own,
+in its own folder, and they cannot collide. An earlier version of this launcher
+shuffled them in and out of the root; that is gone.
 
 ## Card layout
 
 ```
-/CHOMPI.bin                     the launcher -- the ONLY .bin in the root
-/FIRMWARE/01_TAPE.bin           offered on white key 1
-/FIRMWARE/02_TEMPO.bin          white key 2
-/FIRMWARE/03_WAVE.bin           white key 3
-/FIRMWARE/01_TAPE.options.json  per-firmware settings, managed by the launcher
-/FIRMWARE/01_TAPE.presets.json
-/FIRMWARE/last.txt              written by the launcher
-<samples>                       all firmwares' samples share the root
+/CHOMPI.bin            the launcher -- the ONLY .bin in the root
+/FIRMWARE/01_TAPE.bin  offered on white key 1
+/FIRMWARE/02_TEMPO.bin white key 2
+/FIRMWARE/03_WAVE.bin  white key 3
+/TAPE/                 TAPE's samples, options.json, presets.json
+/TEMPO/                Chromatic/ Slice/ Buffer/, options.json, presets.json
+/WAVE/                 wavetables, options.json, presets.json
 ```
 
 Slots are assigned by sorting filenames, so the numeric prefixes pin each
 firmware to a key. Add a firmware by dropping a `.bin` in `/FIRMWARE`; up to 15
-are shown, one per white key.
+are shown, one per white key. Have it `f_chdir()` into its own folder and it
+will never collide with anything else on the card.
 
-Sample files from the three stock firmwares do not collide (`cubbi_*`/`jammi_*`
-for TAPE, `wavetable0N` for WAVE, and `chromatic/` `slice/` `buffer/` for
-TEMPO), so one card can carry all of them.
+`./make-card.sh /Volumes/YOUR_CARD` builds this layout from the factory card
+profiles in `firmware/card-profiles`. It only adds and overwrites, never
+deletes, and refuses to run if a second `.bin` is sitting in the root where it
+would race the launcher for the bootloader's attention.
 
 ## Building
 

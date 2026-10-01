@@ -221,137 +221,15 @@ static void ScanFirmwares()
     }
 }
 
-/* ------------------------------------------------------------------------
- *  Per-firmware settings
+/* Settings are each firmware's own business.
  *
- *  All three stock firmwares keep options.json and presets.json in the card
- *  root, and all three use a different format for them. Left alone they would
- *  overwrite each other every time you switched.
- *
- *  So the launcher owns them: each firmware's pair is parked in /FIRMWARE
- *  under its own name, swapped into the root just before that firmware starts,
- *  and harvested back on the next boot. last.txt remembers whose settings are
- *  currently sitting in the root.
- * ---------------------------------------------------------------------- */
+ *  An earlier version of this launcher shuffled options.json and presets.json
+ *  in and out of the card root, because all three stock firmwares kept them
+ *  there in mutually incompatible formats. They now chdir into their own
+ *  directory at startup instead, so their settings never collide and there is
+ *  nothing here to manage.
+ */
 
-static const char *kLastFile  = "FIRMWARE/last.txt";
-static const char *kSettings[] = {"options.json", "presets.json"};
-static constexpr int kNumSettings = 2;
-
-/** Shared scratch for file copies. 4K keeps the settings copy quick without
- *  eating into anything; these files are only a few KB each.
- *
- *  Aligned because it is a DMA target: SDMMC transfers whole words. */
-static uint8_t __attribute__((aligned(32))) copy_buf[4096];
-
-/** Strip the ".bin" to get the stem a firmware's settings are filed under. */
-static void StemOf(const char *filename, char *out, size_t out_len)
-{
-    strncpy(out, filename, out_len - 1);
-    out[out_len - 1] = '\0';
-    const size_t len = strlen(out);
-    if (len > 4)
-        out[len - 4] = '\0'; /* HasBinExtension() already vouched for ".bin" */
-}
-
-/** Copy one file, truncating the destination. Returns false if the source is
- *  missing, which is the normal case the first time a firmware is launched. */
-static bool CopyFile(const char *src, const char *dst)
-{
-    static FIL fsrc, fdst;
-
-    if (f_open(&fsrc, src, FA_OPEN_EXISTING | FA_READ) != FR_OK)
-        return false;
-
-    if (f_open(&fdst, dst, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
-    {
-        f_close(&fsrc);
-        return false;
-    }
-
-    bool ok = true;
-    for (;;)
-    {
-        UINT got = 0, put = 0;
-        if (f_read(&fsrc, copy_buf, sizeof(copy_buf), &got) != FR_OK)
-        {
-            ok = false;
-            break;
-        }
-        if (got == 0)
-            break; /* end of file */
-        if (f_write(&fdst, copy_buf, got, &put) != FR_OK || put != got)
-        {
-            ok = false;
-            break;
-        }
-    }
-
-    f_close(&fsrc);
-    f_close(&fdst);
-    return ok;
-}
-
-/** "FIRMWARE/<stem>.<settings-file>" */
-static void SettingsPath(const char *stem, const char *which, char *out, size_t out_len)
-{
-    snprintf(out, out_len, "FIRMWARE/%s.%s", stem, which);
-}
-
-/** Save whatever is in the root back to the firmware that last ran. */
-static void HarvestPreviousSettings()
-{
-    static FIL f;
-    char       stem[64] = {0};
-    UINT got      = 0;
-
-    if (f_open(&f, kLastFile, FA_OPEN_EXISTING | FA_READ) != FR_OK)
-        return; /* nothing has run yet */
-
-    if (f_read(&f, stem, sizeof(stem) - 1, &got) == FR_OK && got > 0)
-    {
-        stem[got] = '\0';
-        /* Trim any trailing newline a text editor may have added. */
-        for (UINT i = 0; i < got; i++)
-            if (stem[i] == '\r' || stem[i] == '\n')
-            {
-                stem[i] = '\0';
-                break;
-            }
-    }
-    f_close(&f);
-
-    if (stem[0] == '\0')
-        return;
-
-    for (int i = 0; i < kNumSettings; i++)
-    {
-        char dst[96];
-        SettingsPath(stem, kSettings[i], dst, sizeof(dst));
-        CopyFile(kSettings[i], dst);
-    }
-}
-
-/** Put a firmware's own settings in the root, and record that they are there. */
-static void InstallSettingsFor(const char *stem)
-{
-    for (int i = 0; i < kNumSettings; i++)
-    {
-        char src[96];
-        SettingsPath(stem, kSettings[i], src, sizeof(src));
-        /* A miss is fine and expected on a firmware's first run: whatever is
-           already in the root stays, and the firmware regenerates it. */
-        CopyFile(src, kSettings[i]);
-    }
-
-    static FIL f;
-    if (f_open(&f, kLastFile, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
-    {
-        UINT put = 0;
-        f_write(&f, stem, strlen(stem), &put);
-        f_close(&f);
-    }
-}
 
 /** Bounce buffer for the firmware read.
  *
@@ -611,9 +489,6 @@ int main(void)
         ErrorLoop(Fault::NoFirmwares);
     }
 
-    /* Whatever ran last left its settings in the root. File them away before
-       anything else can overwrite them. */
-    HarvestPreviousSettings();
     Log("ready -- picker up with %d slot(s)", slot_count);
     LogFlush();
 
@@ -656,13 +531,6 @@ int main(void)
                         Log("FAIL: vector table rejected");
                         ErrorLoop(Fault::BadImage);
                     }
-
-                    /* Only once the image is known good, so a bad .bin cannot
-                       disturb the settings currently in the root. */
-                    char stem[64];
-                    StemOf(slots[i].name, stem, sizeof(stem));
-                    InstallSettingsFor(stem);
-                    Log("settings installed for %s", stem);
 
                     /* Last thing written: if the log ends here, the handover
                        itself is where it went wrong. */

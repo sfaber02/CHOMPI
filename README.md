@@ -20,6 +20,13 @@
 >
 > A community modification. Not an official CHOMPI Club release — everything
 > below is their original README.
+>
+> **Use at your own risk.** This is unofficial software provided as-is, with no
+> warranty. It is built to be safe: it never writes to the processor's internal
+> flash, where the bootloader lives, so it should not be able to leave your unit
+> unbootable, and putting a stock card back in returns you to normal. If
+> something ever does go wrong, the Daisy's USB DFU mode is in factory ROM and
+> cannot be overwritten — <https://flash.daisy.audio> will recover the board.
 
 ---
 

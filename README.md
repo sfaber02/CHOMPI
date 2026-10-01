@@ -46,6 +46,49 @@ This repo contains all of the production files, both hardware and firmware, that
 
 Each folder contains its own README, so check those out for more details.
 
+## Card layout — this differs from CHOMPI's instructions
+
+CHOMPI's own docs say to copy a card profile's contents to the **root** of the
+card, and the firmwares shipped expecting to find everything there. **This fork
+changes that**, so the three firmwares can share one card:
+
+```
+/CHOMPI.bin            the launcher -- the ONLY .bin in the root
+/FIRMWARE/01_TAPE.bin  the firmwares the launcher offers, one per white key
+/FIRMWARE/02_TEMPO.bin
+/FIRMWARE/03_WAVE.bin
+/TAPE/                 TAPE's samples, options.json, presets.json
+/TEMPO/                Chromatic/ Slice/ Buffer/, options.json, presets.json
+/WAVE/                 wavetables, options.json, presets.json
+```
+
+Nothing but the launcher lives in the root.
+
+**Why.** The root was a shared *and mutable* namespace: TAPE keeps 168 samples
+there and writes to it while sampling, WAVE scans it for `.wav` and preloads
+the first seven it finds, and all three keep `options.json` / `presets.json`
+there in incompatible formats. Put them on one card and WAVE loads TAPE's drum
+hits as wavetables and comes up silent, while the settings overwrite each other
+on every switch.
+
+**How.** Each firmware calls `f_chdir()` into its own directory immediately
+after mounting the card, so every relative path it opens — and writes — lands
+there instead.
+
+**Stock cards still work.** Each firmware falls back to the root if its folder
+is missing, so these binaries behave exactly like the originals on a
+single-firmware card. The change is additive.
+
+**Writing your own firmware?** Do the same and it will never collide with
+anything else on the card:
+
+```c
+f_chdir("/YOURFIRMWARE");
+```
+
+`firmware/chompi-launcher/make-card.sh /Volumes/YOUR_CARD` builds this layout
+from the factory profiles in `firmware/card-profiles`.
+
 ## What's not here
 
 **The panel artwork.** The graphic set and CHOMPI logos have all been removed for copyright purposes. If you choose to create your own hardware, we ask that you name it something else to avoid trademark infringement.

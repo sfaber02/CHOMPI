@@ -90,6 +90,8 @@ All you need to do for this kind of app is to take the CHOMPI.bin from the `/bui
 
 The firmware loads sound files (`.wav` files) from the SD card, and also stores `options.json` and `presets.json` there. Put your wavetable or sample files in the top-level folder of a FAT-formatted card.
 
+> **Note for this fork:** the three firmwares here look in their own folder first (`/TAPE`, `/TEMPO`, `/WAVE`) and fall back to the top level if it is absent. On a card carrying more than one firmware, put each firmware's files in its folder — see the [repository README](../README.md#card-layout--this-differs-from-chompis-instructions).
+
 ## 6. Debugging
 
 **This requires an STLINK-V3MINIE debugger.**

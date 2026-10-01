@@ -96,6 +96,49 @@ f_chdir("/YOURFIRMWARE");
 `firmware/chompi-launcher/make-card.sh /Volumes/YOUR_CARD` builds this layout
 from the factory profiles in `firmware/card-profiles`.
 
+## Risks, and what actually gets written
+
+Low risk, but not zero risk — here is exactly what happens, so you can judge
+for yourself.
+
+**What gets written**
+
+- **QSPI flash** — the bootloader installs the launcher here, the same way it
+  installs any firmware you put on a card. It happens once, on the first boot
+  after the `.bin` changes (the slow rainbow). The bootloader skips the write
+  when what is on the card already matches what is in QSPI.
+- **Your SD card** — the launcher writes `/FIRMWARE/launcher_log.txt`, and each
+  firmware reads and writes its own settings inside its own folder.
+
+**What never gets written**
+
+- **The STM32's internal flash**, where the bootloader lives. That is the one
+  thing that could genuinely brick a CHOMPI, and nothing here touches it. No
+  DFU step, no chip programmer, no soldering.
+
+**Switching firmwares does not flash anything.** Picking one copies it into RAM
+and resets; QSPI keeps holding the launcher. You write to flash *less* than you
+would by swapping cards.
+
+**If something goes wrong**
+
+1. Power cycle — you land back at the picker.
+2. Put your old card in — the bootloader installs that firmware and you are
+   back on stock.
+3. Worst case, <https://flash.daisy.audio> over USB. The Daisy's DFU mode is in
+   factory ROM and cannot be overwritten, so the board is always recoverable.
+
+**Caveats worth knowing**
+
+- Unofficial, as-is, no warranty. Not a CHOMPI Club release.
+- It is new. It works here and on a handful of other units, but it has not seen
+  a lot of hardware yet.
+- Your existing cards are untouched — this is a separate card, and nothing
+  migrates or modifies your current setup.
+- Each firmware falls back to the card root when its folder is missing, so
+  stock cards still work. But if you create an empty `/TAPE` folder, TAPE will
+  look there and find nothing.
+
 ## What's not here
 
 **The panel artwork.** The graphic set and CHOMPI logos have all been removed for copyright purposes. If you choose to create your own hardware, we ask that you name it something else to avoid trademark infringement.

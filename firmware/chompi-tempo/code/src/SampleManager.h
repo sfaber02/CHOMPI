@@ -43,7 +43,7 @@ class sampleManager {
         FILINFO fno;
         FRESULT res;
 
-        res = f_opendir(&dir, "/Chromatic");
+        res = f_opendir(&dir, "Chromatic");
         if (res == FR_OK) {
             while (true) {
                 res = f_readdir(&dir, &fno);
@@ -55,7 +55,7 @@ class sampleManager {
                     int slotNum = atoi(numberPart);
                     if (slotNum >= 1 && slotNum <= 14) {
                         loadedSamples[0][slotNum - 1].name = fno.fname;
-                        loadedSamples[0][slotNum - 1].fullPath = "/Chromatic/" + loadedSamples[0][slotNum - 1].name;
+                        loadedSamples[0][slotNum - 1].fullPath = "Chromatic/" + loadedSamples[0][slotNum - 1].name;
                         loadedSamples[0][slotNum - 1].status = SampleStatus::LOADING;
                     }
                 }
@@ -63,7 +63,7 @@ class sampleManager {
             f_closedir(&dir);
         }
 
-        res = f_opendir(&dir, "/Slice");
+        res = f_opendir(&dir, "Slice");
         if (res == FR_OK) {
             while (true) {
                 res = f_readdir(&dir, &fno);
@@ -75,7 +75,7 @@ class sampleManager {
                     int slotNum = atoi(numberPart);
                     if (slotNum >= 1 && slotNum <= 14) {
                         loadedSamples[1][slotNum - 1].name = fno.fname;
-                        loadedSamples[1][slotNum - 1].fullPath = "/Slice/" + loadedSamples[1][slotNum - 1].name;
+                        loadedSamples[1][slotNum - 1].fullPath = "Slice/" + loadedSamples[1][slotNum - 1].name;
                         loadedSamples[1][slotNum - 1].status = SampleStatus::LOADING;
                     }
                 }
@@ -83,7 +83,7 @@ class sampleManager {
             f_closedir(&dir);
         }
 
-        res = f_opendir(&dir, "/Buffer");
+        res = f_opendir(&dir, "Buffer");
         if (res == FR_OK) {
             while (true) {
                 res = f_readdir(&dir, &fno);
@@ -92,7 +92,7 @@ class sampleManager {
                 }
                 if (strcmp(fno.fname, "buffer.wav") == 0) {
                         loadedSamples[0][14].name = fno.fname;
-                        loadedSamples[0][14].fullPath = "/Buffer/" + loadedSamples[0][14].name;
+                        loadedSamples[0][14].fullPath = "Buffer/" + loadedSamples[0][14].name;
                         loadedSamples[0][14].status = SampleStatus::LOADING;
                 }
             }
@@ -176,12 +176,12 @@ class sampleManager {
 
     void deleteSlot(size_t slot, size_t engine) {
         if (engine == 0) {
-            delBuffer = "/Chromatic/" + loadedSamples[0][slot - 1].name;
+            delBuffer = "Chromatic/" + loadedSamples[0][slot - 1].name;
             FileRequest delReq(FileRequest::Type::UNLINK, nullptr, delBuffer.c_str(), 0, nullptr, nullptr, nullptr);
             file_manager_->request_fifo.PushBack(delReq);
         }
         else {
-            delBuffer = "/Slice/" + loadedSamples[1][slot - 1].name;
+            delBuffer = "Slice/" + loadedSamples[1][slot - 1].name;
             FileRequest delReq(FileRequest::Type::UNLINK, nullptr, delBuffer.c_str(), 0, nullptr, nullptr, nullptr);
             file_manager_->request_fifo.PushBack(delReq);
         }
@@ -268,10 +268,10 @@ class sampleManager {
     void WriteFileToCard(size_t src, size_t dst, size_t src_engine, size_t dst_engine) {
 
         if (dst_engine == 0) {
-            writeBuffer = "/Chromatic/chroma_a" + std::to_string(dst) + ".wav";
+            writeBuffer = "Chromatic/chroma_a" + std::to_string(dst) + ".wav";
         }
         else {
-            writeBuffer = "/Slice/slice_a" + std::to_string(dst) + ".wav";
+            writeBuffer = "Slice/slice_a" + std::to_string(dst) + ".wav";
         }
 
         FileRequest openReq(FileRequest::Type::OPEN_NEW, &writeFile, writeBuffer.c_str(), 0, nullptr, nullptr, nullptr);

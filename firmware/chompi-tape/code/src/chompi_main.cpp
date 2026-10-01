@@ -333,6 +333,17 @@ int main(void)
     fsi.Init(FatFSInterface::Config::MEDIA_SD);
     f_mount(&fsi.GetSDFileSystem(), fsi.GetSDPath(), 1);
 
+    /* Keep TAPE's files out of the card root.
+     *
+     *  Every path this firmware opens is relative -- samples, options.json,
+     *  presets.json, and the files it writes while sampling (temp_rec.wav,
+     *  looper.wav, chompi_xy.wav) -- so moving the working directory once
+     *  relocates all of them. That leaves the root free for other firmwares
+     *  on a multi-firmware card.
+     *
+     *  If /TAPE is absent we stay in the root, so a stock card still works. */
+    f_chdir("/TAPE");
+
     // delete the battery log if it exists
     char filename[32];
     sprintf(filename, ".batt_log.txt");

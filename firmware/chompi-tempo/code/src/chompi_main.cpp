@@ -385,6 +385,12 @@ int main(void)
     System::Delay(100);
     f_mount(&fsi.GetSDFileSystem(), fsi.GetSDPath(), 1);
 
+    /* Keep TEMPO's files out of the card root. Its sample directories and
+     *  settings are opened relatively from here, so one chdir relocates the
+     *  lot and leaves the root free for other firmwares on a shared card.
+     *  If /TEMPO is absent we stay in the root, so a stock card still works. */
+    f_chdir("/TEMPO");
+
     options.Init();
     tim_base_freq = System::GetPClk2Freq();
 

@@ -159,7 +159,7 @@ Without a card it reports `NO_CARD` and nothing happens.
 
 `midi-send.py` is Linux only and needs nothing beyond Python 3. For macOS and
 Windows there is a web page that does the same in Chrome or Edge:
-https://ugrossek.github.io/CHOMPI/ (source in [ugrossek/CHOMPI](https://github.com/ugrossek/CHOMPI/tree/midi-firmware-load/docs)). The protocol is
+https://ugrossek.github.io/CHOMPI/ (source in `docs/`). The protocol is
 specified in [PROTOCOL.md](PROTOCOL.md), for anyone writing another client.
 
 USB only appears once the launcher has taken the data lines back from the
@@ -203,7 +203,7 @@ log is committed to the card first.
 
 ## Hard-won details
 
-Four things cost real debugging time. All of them are load-bearing.
+Five things cost real debugging time. All of them are load-bearing.
 
 **Every `FIL` must be static, never a stack local.** A `FIL` carries its own
 512-byte sector buffer, and FatFS hands that buffer straight to the SD
@@ -227,6 +227,16 @@ any linker change:
 ```bash
 arm-none-eabi-nm build/CHOMPI.elf | grep boot_info   # must be 38800000
 ```
+
+**The started firmware's `boot_info` is not where it should be either.** The
+stock app linker scripts lack the same region, so in TAPE, TEMPO and WAVE
+`boot_info` sits in plain RAM just past the image (WAVE: `0x2403a77c`), where
+nothing initialises it. libDaisy reads the bootloader version from it at
+start-up, and a 0 makes it skip the clock and SDRAM setup: the firmware runs
+at 64 MHz, the LEDs go full white, the card times out, USB hangs. What is
+there is whatever the launcher left behind, so it worked or not depending on
+the launcher's own layout. The launcher now pads the image with `0xFF` and
+copies the whole 512 KB, which reads as the newest bootloader.
 
 **The log must not truncate itself.** `LogFlush()` deliberately avoids
 `FA_CREATE_ALWAYS`, which truncates on open — so a flush whose write then

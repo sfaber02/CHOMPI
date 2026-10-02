@@ -718,8 +718,22 @@ static void ShutdownPeripherals()
     Log("handing over to 0x%08lX -- goodbye", (unsigned long)entry);
     LogFlush(); /* last chance; the next instruction is the jump */
 
+    /* Copy the whole staging buffer, image padded with 0xFF, not just the
+     *  image. The stock app linker scripts have no backup-SRAM region, so
+     *  libDaisy's boot_info lands in plain RAM just past the image (WAVE:
+     *  0x2403a77c, TAPE: 0x2403b480), where nothing initialises it. libDaisy
+     *  reads its bootloader version from there at start-up, and a 0 makes it
+     *  skip the clock and SDRAM setup: the firmware then runs at 64 MHz, the
+     *  LEDs go white, the card times out and USB hangs. Whether it read 0
+     *  depended on what this launcher happened to leave behind -- WAVE and
+     *  TEMPO hung once the USB code moved things around. 0xFF reads as the
+     *  newest bootloader. (Presumably also what a direct install leaves
+     *  there, if the bootloader copies more than the image out of flash,
+     *  where unused space is 0xFF -- not verified.) */
+    memset(fw_image + length, 0xFF, sizeof(fw_image) - length);
+
     ShutdownPeripherals();
-    ChainLoad(fw_image, length); /* does not return */
+    ChainLoad(fw_image, sizeof(fw_image)); /* does not return */
 }
 
 /** Keybed filling left to right in cyan as an upload arrives -- the same

@@ -159,7 +159,7 @@ Without a card it reports `NO_CARD` and nothing happens.
 
 `midi-send.py` is Linux only and needs nothing beyond Python 3. For macOS and
 Windows there is a web page that does the same in Chrome or Edge:
-https://ugrossek.github.io/CHOMPI/ (source in `docs/`). The protocol is
+https://ugrossek.github.io/CHOMPI/ (source in [ugrossek/CHOMPI](https://github.com/ugrossek/CHOMPI/tree/midi-firmware-load/docs)). The protocol is
 specified in [PROTOCOL.md](PROTOCOL.md), for anyone writing another client.
 
 USB only appears once the launcher has taken the data lines back from the

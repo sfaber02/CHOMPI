@@ -113,15 +113,58 @@ shuffled them in and out of the root; that is gone.
 /WAVE/                 wavetables, options.json, presets.json
 ```
 
-Slots are assigned by sorting filenames, so the numeric prefixes pin each
-firmware to a key. Add a firmware by dropping a `.bin` in `/FIRMWARE`; up to 15
-are shown, one per white key. Have it `f_chdir()` into its own folder and it
+The number in front of the name is the key: `05_TAPE-DEV.bin` is on key 5,
+whatever else is on the card, and keys without a firmware stay dark. Files
+without a number fill the free keys in name order. Add a firmware by dropping
+a `.bin` in `/FIRMWARE`; up to 15 are shown, one per white key. Have it `f_chdir()` into its own folder and it
 will never collide with anything else on the card.
 
 `./make-card.sh /Volumes/YOUR_CARD` builds this layout from the factory card
 profiles in `firmware/card-profiles`. It only adds and overwrites, never
 deletes, and refuses to run if a second `.bin` is sitting in the root where it
 would race the launcher for the bootloader's attention.
+
+## Sending a firmware over USB MIDI
+
+While the launcher is up -- picker showing, or parked on any fault -- it also
+listens on USB MIDI. Send it an image and a slot number, and it stores the
+image in that slot on the card and starts it:
+
+```bash
+./midi-send.py --slot 5 ../chompi-tape/code/src/build/CHOMPI.bin
+```
+
+The keybed fills in cyan as the image arrives, then amber as it is written to
+`/FIRMWARE/05_TAPE.bin`, then white as it is read back to start. Sending to
+slot 5 again replaces it, so a work-in-progress build keeps one slot instead
+of piling up. Whatever was in the slot before goes, including a stock
+firmware: `--slot 1` on a standard card replaces `01_TAPE.bin`.
+
+The name defaults to the project folder the image was built in
+(`chompi-tape` -> `TAPE`); `--name` overrides it.
+
+The image is written to a temporary file and read back before the slot's old
+file is removed. Once stored, it is started exactly as if its key had been
+pressed: read off the card into the same buffer, handed over by the same
+`ChainLoad()`.
+
+That detour through the card is deliberate. An earlier version started the
+uploaded image straight from memory, and TAPE then froze at startup, while
+the very same bytes started fine from the card. The cause was never found.
+Going through the card makes an uploaded firmware indistinguishable from a
+picked one, and that route has not failed since.
+
+It also works with an empty `/FIRMWARE` or a card inserted after power-on.
+Without a card it reports `NO_CARD` and nothing happens.
+
+`midi-send.py` is Linux only and needs nothing beyond Python 3. For macOS and
+Windows there is a web page that does the same in Chrome or Edge:
+https://ugrossek.github.io/CHOMPI/ (source in [ugrossek/CHOMPI](https://github.com/ugrossek/CHOMPI/tree/midi-firmware-load/docs)). The protocol is
+specified in [PROTOCOL.md](PROTOCOL.md), for anyone writing another client.
+
+USB only appears once the launcher has taken the data lines back from the
+MP2722 charger, which TAPE does as well: they are switched between the two, and
+the charger borrows them to identify the port.
 
 ## Building
 
@@ -152,6 +195,8 @@ with `make CHOMPI_LIBS=/path/to/libs`.
 | Slow **magenta** pulse | The image would not read off the card. |
 | Slow **blue** pulse | Image read, but its vector table was rejected. |
 | Slow **white** pulse | Trampoline does not fit its landing site (should be impossible). |
+| Keybed filling in **cyan** | Firmware arriving over USB MIDI. |
+| Keybed filling in **amber** | That firmware being written to its slot on the card. |
 
 On any fault the unit parks there rather than jumping into nothing, and the
 log is committed to the card first.
@@ -195,6 +240,11 @@ from one card, and per-firmware settings survive switching — confirmed by
 saving a TAPE preset and finding it intact after a round trip through another
 firmware.
 
+**USB upload working on hardware.** Stock TAPE sent with `midi-send.py` was
+stored, started, and afterwards offered in the picker; sending again to the
+same slot replaced it rather than adding one. Card write plus readback takes
+140–290 ms for a 240K image.
+
 A healthy boot reads like this. Note the read time — that is the whole image:
 
 ```
@@ -206,6 +256,12 @@ A healthy boot reads like this. Note the read time — that is the whole image:
 [  21486] vector table: MSP=0x20020000 entry=0x24001901
 [  21542] handing over to 0x24001901 -- goodbye
 ```
+
+The very first start after the bootloader has installed a new launcher has
+been seen to hang with the LEDs frozen, before the launcher logged anything.
+A power cycle cleared it, and it has not recurred on later starts. The same
+happened once with a TAPE build, so it looks like a property of the first
+start after flashing rather than of the launcher.
 
 Recovery if a handover ever misbehaves: power cycle. The launcher is still in
 QSPI and nothing was written to internal flash. The jump request is one-shot —

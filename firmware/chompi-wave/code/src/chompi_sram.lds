@@ -23,6 +23,13 @@ MEMORY
 	ITCMRAM (RWX) : ORIGIN = 0x00000000, LENGTH = 64K
 	SDRAM (RWX)   : ORIGIN = 0xc0000000, LENGTH = 64M
   QSPIFLASH (RX)  : ORIGIN = 0x90000000, LENGTH = 8M
+	/* Backup SRAM. Holds libDaisy's boot_info, which carries the bootloader
+	 * version. Without this region .backup_sram falls into the gap between
+	 * .data and .bss, which startup never initialises, and DaisySeed::Init()
+	 * reads the version out of whatever was left in RAM. When that happens to
+	 * be zero, libDaisy skips clock and SDRAM setup and the firmware runs at
+	 * 64 MHz. It has to live here, where the bootloader writes it. */
+	BACKUP_SRAM (RWX) : ORIGIN = 0x38800000, LENGTH = 4K
 }
 
 _estack = 0x20020000;
@@ -219,6 +226,16 @@ SECTIONS
 	} > SDRAM AT >FLASH
 	_sisdram_text = LOADADDR(.sdram_text);
 	*/
+
+	.backup_sram (NOLOAD) :
+	{
+		. = ALIGN(4);
+		_sbackupsram = .;
+		*(.backup_sram)
+		*(.backup_sram*)
+		. = ALIGN(4);
+		_ebackupsram = .;
+	} > BACKUP_SRAM
 
 	.sdram_bss (NOLOAD) :
 	{

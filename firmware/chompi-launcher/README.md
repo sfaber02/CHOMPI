@@ -235,8 +235,11 @@ nothing initialises it. libDaisy reads the bootloader version from it at
 start-up, and a 0 makes it skip the clock and SDRAM setup: the firmware runs
 at 64 MHz, the LEDs go full white, the card times out, USB hangs. What is
 there is whatever the launcher left behind, so it worked or not depending on
-the launcher's own layout. The launcher now pads the image with `0xFF` and
-copies the whole 512 KB, which reads as the newest bootloader.
+the launcher's own layout. [@sfaber02](https://github.com/sfaber02) found
+this, and fixed it at the source: a backup-SRAM region in the firmware's
+linker script. Firmwares built before that fix still have the problem, so the
+launcher also pads the image with `0xFF` and copies the whole 512 KB, which
+reads as the newest bootloader.
 
 **The log must not truncate itself.** `LogFlush()` deliberately avoids
 `FA_CREATE_ALWAYS`, which truncates on open — so a flush whose write then

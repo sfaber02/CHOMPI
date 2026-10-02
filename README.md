@@ -6,6 +6,10 @@
 > key per firmware — press a key, that firmware starts. Power cycle to come
 > back to the picker.
 >
+> Also on the card: **USB storage** on key 15 — the SD card shows up as a drive
+> on your computer — and **firmware install over USB MIDI** straight from the
+> picker, no card swapping.
+>
 > No bootloader modification, and nothing is ever written to the processor's
 > internal flash. It installs like any ordinary firmware update, and swapping
 > back to a stock card returns you to normal.
@@ -51,12 +55,17 @@ changes that**, so the three firmwares can share one card:
 /FIRMWARE/01_TAPE.bin  the firmwares the launcher offers, one per white key
 /FIRMWARE/02_TEMPO.bin
 /FIRMWARE/03_WAVE.bin
+/FIRMWARE/15_USB_STORAGE.bin
 /TAPE/                 TAPE's samples, options.json, presets.json
 /TEMPO/                Chromatic/ Slice/ Buffer/, options.json, presets.json
 /WAVE/                 wavetables, options.json, presets.json
 ```
 
 Nothing but the launcher lives in the root.
+
+The number in front of a firmware's name is its key: `15_USB_STORAGE.bin` is
+on key 15, the last white key, and keys without a firmware stay dark. Files
+without a number fill the free keys.
 
 **Why.** The root was a shared *and mutable* namespace: TAPE keeps 168 samples
 there and writes to it while sampling, WAVE scans it for `.wav` and preloads
@@ -83,6 +92,42 @@ f_chdir("/YOURFIRMWARE");
 `firmware/chompi-launcher/make-card.sh /Volumes/YOUR_CARD` builds this layout
 from the factory profiles in `firmware/card-profiles`.
 
+## USB storage and USB MIDI upload
+
+**USB storage (key 15).** Plug CHOMPI into a computer and press key 15: the SD
+card appears as a USB drive. About 0.8 MB/s writing and 1 MB/s reading — the
+limit of CHOMPI's full-speed USB. It renames the card `CHOMPI-SD`. Eject on the
+computer before powering off. The firmware is
+[@lnetzel](https://github.com/lnetzel)'s
+[CHOMPI-lnetzel](https://github.com/lnetzel/CHOMPI-lnetzel), with the clock fix
+below and faster transfers
+([#4](https://github.com/lnetzel/CHOMPI-lnetzel/pull/4),
+[#5](https://github.com/lnetzel/CHOMPI-lnetzel/pull/5)).
+
+**USB MIDI upload.** While the picker is showing, the launcher also listens on
+USB MIDI: send it a `.bin` and a slot number, and it saves it to
+`/FIRMWARE/NN_NAME.bin` and starts it. Use
+<https://ugrossek.github.io/CHOMPI/> in Chrome or Edge, or
+[`midi-send.py`](firmware/chompi-launcher/midi-send.py) on Linux. Sending to a
+slot **replaces** whatever is in it — slot 1 would overwrite TAPE. By
+[@ugrossek](https://github.com/ugrossek); the protocol is in
+[`PROTOCOL.md`](firmware/chompi-launcher/PROTOCOL.md).
+
+## The 64 MHz bug
+
+CHOMPI's application linker scripts define no `BACKUP_SRAM` region, so
+libDaisy's `boot_info` — where the bootloader leaves its version — landed in
+RAM that nothing initialises. When the leftover value there happened to be 0,
+libDaisy skipped clock and SDRAM setup and the firmware ran at 64 MHz instead
+of 480: blinding white LEDs, SD timeouts, no sound, USB hangs. Whether it
+struck depended on what ran before and on each build's memory layout, so it
+hit some units and builds and not others.
+
+Fixed twice over: TAPE, TEMPO and WAVE put `boot_info` at `0x38800000` where
+the bootloader writes it, and the launcher fills unused RAM with `0xFF` before
+handing over, which protects firmwares that lack the fix. Stock CHOMPI Club
+firmwares carry the same latent bug.
+
 ## Risks, and what actually gets written
 
 Low risk, but not zero risk — here is exactly what happens, so you can judge
@@ -95,7 +140,9 @@ for yourself.
   after the `.bin` changes (the slow rainbow). The bootloader skips the write
   when what is on the card already matches what is in QSPI.
 - **Your SD card** — the launcher writes `/FIRMWARE/launcher_log.txt`, and each
-  firmware reads and writes its own settings inside its own folder.
+  firmware reads and writes its own settings inside its own folder. A USB MIDI
+  upload writes the new firmware into `/FIRMWARE`, replacing that slot. USB
+  storage hands the whole card to your computer.
 
 **What never gets written**
 

@@ -5,7 +5,9 @@
  *  image as SysEx together with a slot number and a name, and this class
  *  assembles and checks it. Storing it in that slot on the card, and starting
  *  it, is the caller's job: Poll() reports Event::Complete and the caller
- *  answers the END with FinishEnd() once the card write is done.
+ *  answers the END with FinishEnd() once the card write is done. LIST and
+ *  CLEAR also need the card, so they go the same way: Poll() reports the
+ *  event and the caller answers with FinishList() or FinishClear().
  *
  *  The protocol is specified in PROTOCOL.md, next to the launcher's README.
  *  In short, every message, both directions, is
@@ -13,10 +15,16 @@
  *      F0 7D 43 48 <cmd> <payload...> F7
  *
  *      01 PING                                -> 41 OK version max_chunk slots
+ *                                                    features launcher_version
  *      02 BEGIN  total:u28 slot name_len name -> 42 status
  *      03 DATA   offset:u28  packed           -> 43 status  received:u28
- *      04 END    crc32:u35                    -> 44 status  (after the write)
+ *      04 END    crc32:u35  [flags]           -> 44 status  (after the write)
  *      05 RUN    slot                         -> 45 status  (then starts it)
+ *      06 LIST   slot                         -> 46 status slot name_len name
+ *                                                    size:u28
+ *      07 CLEAR  slot [name_len name]         -> 47 status slot removed
+ *
+ *  Test launchers 1.4.0 - 1.4.2 had LIST and CLEAR at 05 and 06.
  *
  *  The host sends one message and waits for its reply. Stop-and-wait keeps the
  *  receive side to a single buffer, and USB round trips are short enough that
@@ -30,6 +38,15 @@
  */
 #pragma once
 #include "daisy_seed.h"
+
+/** The launcher's own version. Also in the image as kLauncherTag, which is
+ *  how a launcher recognises another one sent to it for self-update. */
+#ifndef CHOMPI_LAUNCHER_VERSION_PATCH
+#define CHOMPI_LAUNCHER_VERSION_PATCH 0
+#endif
+#define CHOMPI_LAUNCHER_VERSION_MAJOR 1
+#define CHOMPI_LAUNCHER_VERSION_MINOR 5
+#define CHOMPI_LAUNCHER_TAG_PREFIX "CHOMPI-LAUNCHER "
 #include "chainload.h"
 #include <cstring>
 
@@ -39,8 +56,34 @@ namespace chompi
     {
       public:
         static constexpr uint8_t  kVersion  = 1;
-        static constexpr uint32_t kMaxChunk = 256; /**< raw bytes per DATA */
+        /** The launcher's own version, major.minor.patch, after the features
+         *  byte in the PING reply. Test build: not a release number yet. */
+        static constexpr uint8_t kLauncherVersion[3]
+            = {CHOMPI_LAUNCHER_VERSION_MAJOR, CHOMPI_LAUNCHER_VERSION_MINOR,
+               CHOMPI_LAUNCHER_VERSION_PATCH};
+        /** BEGIN's slot for "this image is a new launcher" (FEATURE_LAUNCHER).
+         *  Out of the range of keys; slot 0 is reserved for something else. */
+        static constexpr uint8_t kLauncherSlot = 127;
+        static constexpr uint32_t kMaxChunk = 2048; /**< raw bytes per DATA */
         static constexpr size_t   kMaxName  = 16;  /**< chars in a slot name */
+        /** Most chars of a card filename LIST reports. */
+        static constexpr size_t kMaxListName = 40;
+
+        /** What this launcher can do beyond protocol 1's upload, as the last
+         *  byte of the PING reply. Older launchers send no such byte. */
+        enum Feature : uint8_t
+        {
+            FEATURE_LIST  = 1 << 0, /**< 06 LIST */
+            FEATURE_CLEAR = 1 << 1, /**< 07 CLEAR */
+            FEATURE_STAY  = 1 << 2, /**< END flag: store, do not start */
+            FEATURE_LAUNCHER = 1 << 3, /**< slot 127: update the launcher */
+            FEATURE_RUN   = 1 << 4, /**< 05 RUN */
+        };
+        static constexpr uint8_t kFeatures
+            = FEATURE_LIST | FEATURE_CLEAR | FEATURE_STAY | FEATURE_LAUNCHER | FEATURE_RUN;
+
+        /** END's optional flags byte. */
+        static constexpr uint8_t kEndStay = 1 << 0;
 
         enum Cmd : uint8_t
         {
@@ -49,6 +92,8 @@ namespace chompi
             DATA  = 0x03,
             END   = 0x04,
             RUN   = 0x05,
+            LIST  = 0x06,
+            CLEAR = 0x07,
             REPLY = 0x40, /**< or'd into the command being answered */
         };
 
@@ -67,6 +112,10 @@ namespace chompi
             BAD_NAME    = 9, /**< empty, too long, or a forbidden character */
             NO_CARD      = 10, /**< no card, or it would not mount */
             WRITE_FAILED = 11, /**< the card refused it, or readback differed */
+            CARD_FULL    = 12, /**< no room on the card for the image */
+            NOT_LAUNCHER = 13, /**< slot 127, but the image is no launcher */
+            OTHER_BIN    = 14, /**< another .bin in the card root would be
+                                    installed instead of the new launcher */
         };
 
         /** What Poll() saw, for the caller's LEDs and log. */
@@ -78,6 +127,8 @@ namespace chompi
             Progress,
             Rejected, /**< a message was answered with an error */
             Complete, /**< image whole and checked; END awaits FinishEnd() */
+            List,     /**< LIST awaits FinishList() */
+            Clear,    /**< CLEAR awaits FinishClear() */
             Run,      /**< RUN for RunSlot(); awaits FinishRun() */
         };
 
@@ -119,17 +170,67 @@ namespace chompi
             return ev;
         }
 
-        /** An upload is under way: BEGIN accepted, recently heard from. */
+        /** An upload is under way: BEGIN accepted, recently heard from, and
+         *  not yet stored. */
         bool Active(uint32_t now) const
         {
-            return total_ > 0 && now - last_heard_ < kStallMs;
+            return total_ > 0 && !stored_ && now - last_heard_ < kStallMs;
         }
 
         /** Answer the END that produced Event::Complete, once the image has
          *  been stored (OK) or could not be (NO_CARD, WRITE_FAILED). On OK the
-         *  caller then boots it; on a failure the upload stays intact, so the
-         *  host may fix the problem and send END again. */
-        void FinishEnd(Status s) { ReplyStatus(END, s); }
+         *  caller then boots it, unless Stay(); on a failure the upload stays
+         *  intact, so the host may fix the problem and send END again. */
+        void FinishEnd(Status s)
+        {
+            stored_ = (s == OK);
+            ReplyStatus(END, s);
+        }
+
+        /** Answer LIST for Slot(): what is on that key, or name "" if
+         *  nothing. Characters outside printable ASCII are sent as '?'. */
+        void FinishList(Status s, const char *name, uint32_t size)
+        {
+            if (s != OK)
+            {
+                ReplyStatus(LIST, s);
+                return;
+            }
+            uint8_t p[2 + 1 + kMaxListName + 4] = {s, query_slot_};
+            const size_t len = ListName(name, p + 3);
+            p[2] = (uint8_t)len;
+            Put7(p + 3 + len, size, 4);
+            last_status_ = s;
+            Reply(LIST, p, 3 + len + 4);
+        }
+
+        /** Whether CLEAR may remove `name`, the file on Slot()'s key: yes if
+         *  the CLEAR named no file, or named this one as LIST reports it. */
+        bool ClearMatches(const char *name) const
+        {
+            if (!clear_name_given_)
+                return true;
+            uint8_t listed[kMaxListName];
+            const size_t len = ListName(name, listed);
+            return len == clear_name_len_ && memcmp(listed, clear_name_, len) == 0;
+        }
+
+        /** Answer CLEAR: OK with whether anything was removed, or why the key
+         *  could not be emptied. */
+        void FinishClear(Status s, bool removed)
+        {
+            if (s != OK)
+            {
+                ReplyStatus(CLEAR, s);
+                return;
+            }
+            const uint8_t p[3] = {s, query_slot_, (uint8_t)(removed ? 1 : 0)};
+            last_status_       = s;
+            Reply(CLEAR, p, sizeof(p));
+        }
+
+        /** The END asked to store only: the launcher stays in the picker. */
+        bool Stay() const { return end_flags_ & kEndStay; }
 
         /** Answer the RUN that produced Event::Run: OK just before the caller
          *  starts the slot, BAD_SLOT if there is nothing in it. */
@@ -138,9 +239,12 @@ namespace chompi
         uint32_t    Received() const { return received_; }
         uint32_t    Total() const { return total_; }
         uint32_t    Crc() const { return crc_; }
-        uint8_t     Slot() const { return slot_; }
+        /** The upload's slot, or for List/Clear the slot asked about. */
+        uint8_t     Slot() const { return query_slot_ ? query_slot_ : slot_; }
         uint8_t     RunSlot() const { return run_slot_; }
         const char *Name() const { return name_; }
+        /** The upload is a new launcher, not a firmware for a key. */
+        bool        ForLauncher() const { return slot_ == kLauncherSlot; }
         Status      LastStatus() const { return last_status_; }
 
       private:
@@ -222,6 +326,34 @@ namespace chompi
                 p[i] = v & 0x7F;
         }
 
+        /** Whether the image carries a launcher's kLauncherTag: the prefix
+         *  followed by a version number. A firmware for a key never does. */
+        static bool HasLauncherTag(const uint8_t *p, uint32_t len)
+        {
+            static const char kPrefix[] = CHOMPI_LAUNCHER_TAG_PREFIX;
+            const uint32_t    n         = sizeof(kPrefix) - 1;
+            for (uint32_t i = 0; i + n < len; i++)
+                if (p[i] == (uint8_t)kPrefix[0] && memcmp(p + i, kPrefix, n) == 0
+                   && p[i + n] >= '0' && p[i + n] <= '9')
+                    return true;
+            return false;
+        }
+
+        /** A card filename the way LIST sends it: at most kMaxListName
+         *  chars, anything outside printable ASCII as '?'. Returns the
+         *  length; nullptr counts as "". */
+        static size_t ListName(const char *name, uint8_t *out)
+        {
+            size_t len = 0;
+            if (name)
+                while (name[len] && len < kMaxListName)
+                {
+                    const uint8_t c = (uint8_t)name[len];
+                    out[len++]      = (c >= 0x20 && c < 0x7F) ? c : '?';
+                }
+            return len;
+        }
+
         static uint32_t Crc32(const uint8_t *p, uint32_t len)
         {
             uint32_t crc = 0xFFFFFFFFU;
@@ -252,7 +384,7 @@ namespace chompi
 
         void Reply(uint8_t cmd, const uint8_t *payload, size_t len)
         {
-            uint8_t out[16] = {0xF0, 0x7D, 0x43, 0x48, (uint8_t)(cmd | REPLY)};
+            uint8_t out[64] = {0xF0, 0x7D, 0x43, 0x48, (uint8_t)(cmd | REPLY)};
             size_t  n       = kHeaderLen;
             for (size_t i = 0; i < len && n < sizeof(out) - 1; i++)
                 out[n++] = payload[i];
@@ -286,14 +418,17 @@ namespace chompi
             const size_t   blen = len - kHeaderLen - 1; /* minus F7 */
 
             last_heard_ = System::GetNow();
+            query_slot_ = 0;
 
             switch (cmd)
             {
                 case PING:
                 {
-                    uint8_t p[7] = {OK, kVersion};
+                    uint8_t p[11] = {OK, kVersion};
                     Put7(p + 2, kMaxChunk, 4);
                     p[6] = slots_;
+                    p[7] = kFeatures;
+                    memcpy(p + 8, kLauncherVersion, 3);
                     Reply(cmd, p, sizeof(p));
                     return Event::Pinged;
                 }
@@ -303,6 +438,7 @@ namespace chompi
                     /* Whatever happens next, the previous upload is gone. */
                     total_    = 0;
                     received_ = 0;
+                    stored_   = false;
 
                     if (blen < 6 || blen != 6u + body[5])
                         return Fail(cmd, BAD_MESSAGE);
@@ -310,7 +446,7 @@ namespace chompi
                     if (total < 8 || total > capacity_)
                         return Fail(cmd, TOO_BIG);
                     const uint8_t slot = body[4];
-                    if (slot < 1 || slot > slots_)
+                    if ((slot < 1 || slot > slots_) && slot != kLauncherSlot)
                         return Fail(cmd, BAD_SLOT);
                     if (!NameValid(body + 6, body[5]))
                         return Fail(cmd, BAD_NAME);
@@ -359,8 +495,9 @@ namespace chompi
                 {
                     if (total_ == 0)
                         return Fail(cmd, NOT_STARTED);
-                    if (blen != 5)
+                    if (blen != 5 && blen != 6)
                         return Fail(cmd, BAD_MESSAGE);
+                    end_flags_ = blen == 6 ? body[5] : 0;
                     if (received_ != total_)
                         return Fail(cmd, INCOMPLETE);
                     crc_ = Get7(body, 5);
@@ -368,9 +505,40 @@ namespace chompi
                         return Fail(cmd, BAD_CRC);
                     if (!ImageLooksValid(image_, total_))
                         return Fail(cmd, BAD_IMAGE);
+                    if (ForLauncher() && !HasLauncherTag(image_, total_))
+                        return Fail(cmd, NOT_LAUNCHER);
                     /* No reply yet: it waits until the image is on the card,
                        so the host learns the final outcome. FinishEnd(). */
                     return Event::Complete;
+                }
+
+                case LIST:
+                {
+                    if (blen != 1)
+                        return Fail(cmd, BAD_MESSAGE);
+                    if (body[0] < 1 || body[0] > slots_)
+                        return Fail(cmd, BAD_SLOT);
+                    /* An upload in progress keeps its image; only the card is
+                       looked at or changed. */
+                    query_slot_ = body[0];
+                    return Event::List;
+                }
+
+                case CLEAR:
+                {
+                    /* slot [name_len name]: with a name, only that file goes.
+                       A resent CLEAR then cannot take a file that moved onto
+                       the key after the first one. */
+                    if (blen != 1 && (blen < 2 || blen != 2u + body[1]
+                                      || body[1] > kMaxListName))
+                        return Fail(cmd, BAD_MESSAGE);
+                    if (body[0] < 1 || body[0] > slots_)
+                        return Fail(cmd, BAD_SLOT);
+                    clear_name_given_ = blen > 1;
+                    clear_name_len_   = clear_name_given_ ? body[1] : 0;
+                    memcpy(clear_name_, body + 2, clear_name_len_);
+                    query_slot_ = body[0];
+                    return Event::Clear;
                 }
 
                 case RUN:
@@ -403,6 +571,12 @@ namespace chompi
         uint32_t last_heard_  = 0;
         uint32_t crc_         = 0;
         uint8_t  slot_        = 0;
+        uint8_t  query_slot_  = 0; /**< LIST/CLEAR's slot until answered */
+        uint8_t  end_flags_   = 0;
+        bool     stored_      = false; /**< END answered OK */
+        bool     clear_name_given_ = false;
+        size_t   clear_name_len_   = 0;
+        uint8_t  clear_name_[kMaxListName] = {};
         uint8_t  run_slot_    = 0;
         char     name_[kMaxName + 1] = {};
         Status   last_status_ = OK;

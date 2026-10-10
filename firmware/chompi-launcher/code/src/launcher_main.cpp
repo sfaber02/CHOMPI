@@ -13,8 +13,10 @@
  *  A firmware can also arrive over USB MIDI (see midi_upload.h and
  *  PROTOCOL.md). It is written into the slot the host names, then read back
  *  off the card and started exactly as if its key had been pressed -- send it
- *  while the picker is up, or while any fault is showing. A host can also just
- *  start a slot that is already on the card (RUN), as its key would.
+ *  while the picker is up, or while any fault is showing. A host setting up
+ *  several slots in one go asks to store only; the launcher then stays in the
+ *  picker, and the host can also list and clear slots, or start one that is
+ *  already on the card (RUN), as its key would.
  */
 #include "daisy_seed.h"
 #include "hardware.h"
@@ -27,6 +29,14 @@
 #include <cstdarg>
 
 using namespace daisy;
+
+#define CHOMPI_STR_(x) #x
+#define CHOMPI_STR(x) CHOMPI_STR_(x)
+/** Marks this image as a launcher, with its version. A launcher only takes
+ *  an image carrying this as a new launcher (MidiUpload::HasLauncherTag). */
+extern "C" __attribute__((used)) const char kLauncherTag[]
+    = CHOMPI_LAUNCHER_TAG_PREFIX CHOMPI_STR(CHOMPI_LAUNCHER_VERSION_MAJOR) "." CHOMPI_STR(
+        CHOMPI_LAUNCHER_VERSION_MINOR) "." CHOMPI_STR(CHOMPI_LAUNCHER_VERSION_PATCH);
 using namespace chompi;
 
 /** Where the firmwares live. Invisible to the bootloader because it is a
@@ -72,6 +82,10 @@ MidiUpload upload;
 /** Whether the card is mounted. An upload remounts it if not, so a card
  *  inserted after power-on still works. */
 static bool card_ok = false;
+
+/** The host changed the card while a fault was showing: go to the picker
+ *  once there is something on it. */
+static bool picker_wanted = false;
 
 /* ------------------------------------------------------------------------
  *  Logging
@@ -210,7 +224,7 @@ static int SlotFromName(const char *name)
  *  a firmware stays on its key no matter what else is on the card -- the
  *  same slot number a USB upload names. Files without a prefix (or whose key
  *  is taken) fill the free keys in name order. */
-static void ScanFirmwares()
+static void ScanFirmwares(bool verbose = true)
 {
     static Slot found[2 * kMaxSlots];
     int         n_found = 0;
@@ -239,24 +253,28 @@ static void ScanFirmwares()
             break; /* end of directory */
 
         seen++;
-        Log("  entry: \"%s\" attrib=0x%02X size=%lu", info.fname,
-            (unsigned)info.fattrib, (unsigned long)info.fsize);
+        if (verbose)
+            Log("  entry: \"%s\" attrib=0x%02X size=%lu", info.fname,
+                (unsigned)info.fattrib, (unsigned long)info.fsize);
 
         if (info.fattrib & (AM_HID | AM_DIR))
         {
-            Log("    skip: hidden or directory");
+            if (verbose)
+                Log("    skip: hidden or directory");
             continue;
         }
         if (!HasBinExtension(info.fname))
         {
-            Log("    skip: not .bin");
+            if (verbose)
+                Log("    skip: not .bin");
             continue;
         }
         /* Anything that cannot be a valid image is not worth a key. */
         if (info.fsize < 8 || info.fsize > sizeof(fw_image))
         {
-            Log("    skip: size out of range (max %lu)",
-                (unsigned long)sizeof(fw_image));
+            if (verbose)
+                Log("    skip: size out of range (max %lu)",
+                    (unsigned long)sizeof(fw_image));
             continue;
         }
 
@@ -428,27 +446,74 @@ static void DrawWriteProgress(uint32_t done, uint32_t total)
     fill_led_data();
 }
 
-/** Write the uploaded image into its slot: /FIRMWARE/NN_NAME.bin.
- *
- *  Goes to a temporary file first, which is read back and compared before any
- *  existing NN_* file is removed, so a failed write never costs the firmware
- *  already in the slot. On success *out describes the new file, ready for
- *  LoadImage(). */
-static MidiUpload::Status StoreUpload(Slot *out)
+/** Mount the card if it is not yet. False if there is none. */
+static bool EnsureCard()
 {
-    static const char *kTemp = "FIRMWARE/upload.tmp";
-    static FIL         file;
+    if (card_ok)
+        return true;
+    const FRESULT res = f_mount(&fsi.GetSDFileSystem(), fsi.GetSDPath(), 1);
+    Log("card was not mounted, f_mount -> %d", (int)res);
+    card_ok = (res == FR_OK);
+    if (card_ok)
+        ScanFirmwares(false);
+    return card_ok;
+}
+
+/** Remove every NN_* file in /FIRMWARE, whatever its name, and with
+ *  `also` set that file too (a firmware without a number sitting on key NN).
+ *  Collected first, since deleting while the directory is being read is
+ *  asking for trouble. */
+static bool RemoveSlotFiles(unsigned slot, const char *also)
+{
+    char prefix[8];
+    snprintf(prefix, sizeof(prefix), "%02u_", slot);
+
+    static char doomed[8][_MAX_LFN + 1];
+    int         n_doomed = 0;
+    DIR         dir;
+    FILINFO     info;
+    if (f_opendir(&dir, kFirmwareDir) == FR_OK)
+    {
+        while (n_doomed < 8 && f_readdir(&dir, &info) == FR_OK && info.fname[0])
+        {
+            if (!(info.fattrib & AM_DIR)
+               && (strncmp(info.fname, prefix, 3) == 0
+                   || (also && strcmp(info.fname, also) == 0)))
+            {
+                /* Same size as fname, so it always fits. */
+                strcpy(doomed[n_doomed++], info.fname);
+            }
+        }
+        f_closedir(&dir);
+    }
+    for (int i = 0; i < n_doomed; i++)
+    {
+        static char path[sizeof(doomed[0]) + 16];
+        strcpy(path, kFirmwareDir);
+        strcat(path, "/");
+        strcat(path, doomed[i]);
+        const FRESULT res = f_unlink(path);
+        Log("removing %s, f_unlink -> %d", path, (int)res);
+        if (res != FR_OK)
+            return false;
+    }
+    return true;
+}
+
+/** Where an upload is written and checked before it takes its place. In
+ *  /FIRMWARE, which the bootloader never looks into, and not called *.bin. */
+static const char *kTemp = "FIRMWARE/upload.tmp";
+
+/** Write the uploaded image to kTemp and read it back. On failure kTemp is
+ *  gone again and nothing else on the card has changed. */
+static MidiUpload::Status WriteTemp()
+{
+    static FIL file;
 
     const uint32_t len = upload.Total();
 
-    if (!card_ok)
-    {
-        const FRESULT res = f_mount(&fsi.GetSDFileSystem(), fsi.GetSDPath(), 1);
-        Log("store: card was not mounted, f_mount -> %d", (int)res);
-        if (res != FR_OK)
-            return MidiUpload::NO_CARD;
-        card_ok = true;
-    }
+    if (!EnsureCard())
+        return MidiUpload::NO_CARD;
 
     FRESULT res = f_mkdir(kFirmwareDir);
     if (res != FR_OK && res != FR_EXIST)
@@ -462,9 +527,10 @@ static MidiUpload::Status StoreUpload(Slot *out)
     res = f_open(&file, kTemp, FA_CREATE_ALWAYS | FA_WRITE);
     Log("store: f_open(\"%s\") -> %d", kTemp, (int)res);
     if (res != FR_OK)
-        return MidiUpload::WRITE_FAILED;
+        return res == FR_DENIED ? MidiUpload::CARD_FULL : MidiUpload::WRITE_FAILED;
 
-    bool ok = true;
+    bool ok   = true;
+    bool full = false;
     for (uint32_t off = 0; ok && off < len; off += kChunkSize)
     {
         const UINT want = len - off < kChunkSize ? len - off : kChunkSize;
@@ -476,7 +542,8 @@ static MidiUpload::Status StoreUpload(Slot *out)
             Log("store: f_write at %lu -> %d, put %lu of %lu",
                 (unsigned long)off, (int)res, (unsigned long)put,
                 (unsigned long)want);
-            ok = false;
+            ok   = false;
+            full = (res == FR_OK); /* FatFs's way of saying "no room" */
         }
         DrawWriteProgress(off + want, len);
     }
@@ -484,7 +551,11 @@ static MidiUpload::Status StoreUpload(Slot *out)
     if (res != FR_OK)
         Log("store: f_close -> %d", (int)res);
     if (!ok || res != FR_OK)
-        return MidiUpload::WRITE_FAILED;
+    {
+        /* Don't leave a half-written temp file taking up the room. */
+        Log("store: f_unlink(\"%s\") -> %d", kTemp, (int)f_unlink(kTemp));
+        return full ? MidiUpload::CARD_FULL : MidiUpload::WRITE_FAILED;
+    }
 
     /* Read back and compare: a card that silently drops writes would
        otherwise leave a slot that fails only the next time it is chosen. */
@@ -503,54 +574,133 @@ static MidiUpload::Status StoreUpload(Slot *out)
     }
     f_close(&file);
     if (!ok || res != FR_OK)
+    {
+        Log("store: f_unlink(\"%s\") -> %d", kTemp, (int)f_unlink(kTemp));
         return MidiUpload::WRITE_FAILED;
+    }
     Log("store: %lu bytes written and verified in %lu ms", (unsigned long)len,
         (unsigned long)(System::GetNow() - started));
+    return MidiUpload::OK;
+}
 
-    /* Clear the slot: every NN_* file, whatever its name. Collected first,
-       since deleting while the directory is being read is asking for trouble. */
-    char prefix[8];
-    snprintf(prefix, sizeof(prefix), "%02u_", (unsigned)upload.Slot());
+/** Write the uploaded image into its slot: /FIRMWARE/NN_NAME.bin.
+ *
+ *  Goes to a temporary file first, which is read back and compared before any
+ *  existing NN_* file is removed, so a failed write never costs the firmware
+ *  already in the slot. On success *out describes the new file, ready for
+ *  LoadImage(). */
+static MidiUpload::Status StoreUpload(Slot *out)
+{
+    const MidiUpload::Status st = WriteTemp();
+    if (st != MidiUpload::OK)
+        return st;
+    const uint32_t len = upload.Total();
 
-    static char doomed[8][_MAX_LFN + 1];
-    int         n_doomed = 0;
-    DIR         dir;
-    FILINFO     info;
-    if (f_opendir(&dir, kFirmwareDir) == FR_OK)
-    {
-        while (n_doomed < 8 && f_readdir(&dir, &info) == FR_OK && info.fname[0])
-        {
-            if (!(info.fattrib & AM_DIR) && strncmp(info.fname, prefix, 3) == 0)
-            {
-                /* Same size as fname, so it always fits. */
-                strcpy(doomed[n_doomed++], info.fname);
-            }
-        }
-        f_closedir(&dir);
-    }
-    for (int i = 0; i < n_doomed; i++)
-    {
-        static char path[sizeof(doomed[0]) + 16];
-        strcpy(path, kFirmwareDir);
-        strcat(path, "/");
-        strcat(path, doomed[i]);
-        res = f_unlink(path);
-        Log("store: replacing %s, f_unlink -> %d", path, (int)res);
-        if (res != FR_OK)
-            return MidiUpload::WRITE_FAILED;
-    }
+    /* Clear the slot: every NN_* file, whatever its name. A firmware without
+       a number that happened to sit on this key stays, and moves to a free
+       one. */
+    if (!RemoveSlotFiles(upload.Slot(), nullptr))
+        return MidiUpload::WRITE_FAILED;
 
-    snprintf(out->name, sizeof(out->name), "%s%s.bin", prefix, upload.Name());
+    snprintf(out->name, sizeof(out->name), "%02u_%s.bin", (unsigned)upload.Slot(),
+             upload.Name());
     out->size = len;
 
     char path[80];
     snprintf(path, sizeof(path), "%s/%s", kFirmwareDir, out->name);
-    res = f_rename(kTemp, path);
+    const FRESULT res = f_rename(kTemp, path);
     Log("store: f_rename -> \"%s\" -> %d", path, (int)res);
     if (res != FR_OK)
         return MidiUpload::WRITE_FAILED;
 
     return MidiUpload::OK;
+}
+
+/** A .bin in the card root other than CHOMPI.bin, as the bootloader sees
+ *  them: it installs the first one it meets, so with one of these around a
+ *  new CHOMPI.bin might never be installed. Fills `name` if found. */
+static bool OtherRootBin(char *name, size_t size)
+{
+    DIR     dir;
+    FILINFO info;
+    bool    found = false;
+    if (f_opendir(&dir, "/") != FR_OK)
+        return false;
+    while (!found && f_readdir(&dir, &info) == FR_OK && info.fname[0])
+    {
+        if (info.fattrib & (AM_HID | AM_DIR))
+            continue; /* the bootloader skips these too */
+        if ((strstr(info.fname, ".bin") || strstr(info.fname, ".BIN"))
+           && strcasecmp(info.fname, "CHOMPI.bin") != 0)
+        {
+            snprintf(name, size, "%s", info.fname);
+            found = true;
+        }
+    }
+    f_closedir(&dir);
+    return found;
+}
+
+/** Put the uploaded launcher in place as /CHOMPI.bin, keeping the current one
+ *  as /CHOMPI.old. The bootloader installs it at the next start, because it
+ *  differs from what it holds.
+ *
+ *  Safe against power loss at any step: until the bootloader has installed
+ *  the new file, it still holds this launcher and starts it, and while it
+ *  installs, the new file stays on the card for it to try again. To go back,
+ *  rename CHOMPI.old to CHOMPI.bin on a computer. */
+static MidiUpload::Status StoreLauncher()
+{
+    if (!EnsureCard())
+        return MidiUpload::NO_CARD;
+
+    char other[_MAX_LFN + 1];
+    if (OtherRootBin(other, sizeof(other)))
+    {
+        Log("launcher: refusing, \"%s\" in the card root would be installed instead",
+            other);
+        return MidiUpload::OTHER_BIN;
+    }
+
+    const MidiUpload::Status st = WriteTemp();
+    if (st != MidiUpload::OK)
+        return st;
+
+    FRESULT res = f_unlink("/CHOMPI.old");
+    Log("launcher: f_unlink(CHOMPI.old) -> %d", (int)res);
+    res = f_rename("/CHOMPI.bin", "/CHOMPI.old");
+    Log("launcher: CHOMPI.bin -> CHOMPI.old: %d", (int)res);
+    if (res != FR_OK && res != FR_NO_FILE)
+    {
+        f_unlink(kTemp);
+        return MidiUpload::WRITE_FAILED;
+    }
+    res = f_rename(kTemp, "/CHOMPI.bin");
+    Log("launcher: upload -> CHOMPI.bin: %d", (int)res);
+    if (res != FR_OK)
+    {
+        /* Put the old one back, so the card is as it was. */
+        Log("launcher: restoring CHOMPI.old -> %d",
+            (int)f_rename("/CHOMPI.old", "/CHOMPI.bin"));
+        f_unlink(kTemp);
+        return MidiUpload::WRITE_FAILED;
+    }
+    return MidiUpload::OK;
+}
+
+static void ShutdownPeripherals();
+
+/** Restart without a jump request: the bootloader then checks the card and
+ *  installs the new CHOMPI.bin. */
+[[noreturn]] static void RestartForInstall()
+{
+    Log("launcher: restarting so the bootloader installs the new one");
+    LogFlush();
+    ShutdownPeripherals();
+    boot_info.status = System::BootInfo::Type::INVALID;
+    __DSB();
+    NVIC_SystemReset();
+    for (;;) {}
 }
 
 /** Breathing white on every populated key. Unpopulated keys stay dark, so the
@@ -611,6 +761,7 @@ enum class Fault
 
 static void ServiceUsb(uint32_t now);
 static void DrawUploadProgress();
+[[noreturn]] static void PickerLoop();
 [[noreturn]] static void StartSlot(int index);
 
 /** Slow pulse, and the unit stays here rather than jumping into nothing.
@@ -638,6 +789,14 @@ static void DrawUploadProgress();
     {
         const uint32_t now = System::GetNow();
         ServiceUsb(now);
+
+        /* The host has put firmwares on the card: offer them. */
+        if (picker_wanted && slot_count > 0)
+        {
+            Log("fault cleared from USB -- picker up with %d slot(s)", slot_count);
+            LogFlush();
+            PickerLoop();
+        }
 
         if (now - tick < 16)
             continue;
@@ -924,14 +1083,36 @@ static void ServiceUsb(uint32_t now)
                 (unsigned long)upload.Crc(), (unsigned)upload.Slot(),
                 upload.Name());
 
+            if (upload.ForLauncher())
+            {
+                const MidiUpload::Status st = StoreLauncher();
+                upload.FinishEnd(st);
+                if (st != MidiUpload::OK)
+                {
+                    Log("usb: launcher not stored, status %d", (int)st);
+                    LogFlush();
+                    break;
+                }
+                System::Delay(50); /* let the END reply leave */
+                RestartForInstall();
+            }
+
             Slot                     stored;
             const MidiUpload::Status st = StoreUpload(&stored);
+            if (st == MidiUpload::OK && upload.Stay())
+                ScanFirmwares(false); /* before the reply: a LIST may follow */
             upload.FinishEnd(st);
             if (st != MidiUpload::OK)
             {
                 Log("usb: store failed, status %d -- upload kept for a retry",
                     (int)st);
                 LogFlush();
+                break;
+            }
+            if (upload.Stay())
+            {
+                Log("usb: stored as %s, staying in the picker", stored.name);
+                picker_wanted = true;
                 break;
             }
 
@@ -946,6 +1127,44 @@ static void ServiceUsb(uint32_t now)
                 ErrorLoop(Fault::ReadFailed);
             }
             Boot(length);
+        }
+
+        case MidiUpload::Event::List:
+        {
+            const int s = upload.Slot() - 1;
+            if (!EnsureCard())
+                upload.FinishList(MidiUpload::NO_CARD, nullptr, 0);
+            else if (slots[s].size)
+                upload.FinishList(MidiUpload::OK, slots[s].name, slots[s].size);
+            else
+                upload.FinishList(MidiUpload::OK, "", 0);
+            break;
+        }
+
+        case MidiUpload::Event::Clear:
+        {
+            const int s = upload.Slot() - 1;
+            if (!EnsureCard())
+            {
+                upload.FinishClear(MidiUpload::NO_CARD, false);
+                break;
+            }
+            /* Whatever is on that key goes, numbered or not: the host saw it
+               there in a LIST. If the host named the file, only that one: a
+               key holding something else is left alone. */
+            const char *on_key = slots[s].size ? slots[s].name : nullptr;
+            if (!on_key || !upload.ClearMatches(on_key))
+            {
+                Log("usb: clear key %d -> nothing to remove", s + 1);
+                upload.FinishClear(MidiUpload::OK, false);
+                break;
+            }
+            const bool ok = RemoveSlotFiles(upload.Slot(), on_key);
+            ScanFirmwares(false);
+            Log("usb: clear key %d -> %s", s + 1, ok ? "ok" : "failed");
+            picker_wanted = true;
+            upload.FinishClear(ok ? MidiUpload::OK : MidiUpload::WRITE_FAILED, ok);
+            break;
         }
 
         case MidiUpload::Event::Run:
@@ -1004,7 +1223,7 @@ int main(void)
     card_ok = (mres == FR_OK);
     if (card_ok)
         LogStartRun();
-    Log("==== CHOMPI launcher: boot");
+    Log("==== %s: boot", kLauncherTag);
     Log("f_mount(\"%s\") -> %d", sd_path ? sd_path : "(null)", (int)mres);
 
     if (mres != FR_OK)
@@ -1035,7 +1254,13 @@ int main(void)
 
     Log("ready -- picker up with %d slot(s)", slot_count);
     LogFlush();
+    PickerLoop();
+}
 
+/** Light a key per firmware and start the one pressed. Keeps listening on
+ *  USB throughout, and follows the card as the host changes it. */
+[[noreturn]] static void PickerLoop()
+{
     /* Wait for every key to be released before arming, so that a key still held
        down from power-on does not immediately select a slot. */
     bool     armed = false;

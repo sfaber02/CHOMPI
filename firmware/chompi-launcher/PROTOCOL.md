@@ -1,7 +1,8 @@
 # CHOMPI Launcher USB-MIDI Upload Protocol
 
-**Status: draft, protocol version 1.** Nothing has been released yet, so this
-is the first version. It is not the one `midi_upload.h` currently implements.
+**Protocol version 1.** Launcher v1.1 brought PING, BEGIN, DATA and END;
+v1.5 adds the features below (LIST, CLEAR, STAY, the launcher's own update)
+and RUN. Additions keep version 1: clients find them in PING's features byte.
 
 This describes how a host program sends a firmware image to the CHOMPI
 launcher over USB MIDI and stores it in a slot on the SD card. It is meant
@@ -19,6 +20,10 @@ MIDI, or a native app on any platform.
 Sending again to the same slot replaces the firmware there. That is the
 intended develop-test-debug loop: one slot for your work-in-progress build,
 overwritten on each send.
+
+Newer launchers can also set up several slots in one go: the client lists
+what is on each key, clears keys, and stores firmwares without starting them
+(see Features). The launcher then stays in the picker throughout.
 
 ## When the launcher listens
 
@@ -111,19 +116,22 @@ Reply `41`:
 |---|---|---|
 | status | `u7` | always `0` |
 | version | `u7` | protocol version, `1` for this document |
-| max_chunk | `u28` | most raw bytes one `DATA` may carry (currently 256) |
+| max_chunk | `u28` | most raw bytes one `DATA` may carry (2048 from launcher v1.5; 256 before). Clients may send less |
 | slots | `u7` | highest slot number accepted (currently 15) |
+| features | `u7` | optional, see Features. Missing on older launchers: treat as `0` |
+| launcher_version | 3 × `u7` | optional: major, minor, patch of the launcher itself. Missing on older launchers |
 
 PING is safe at any time and does not affect an upload in progress. Clients
 should use it to find the launcher and should refuse to continue if
-`version` is one they do not know.
+`version` is one they do not know. They should accept a longer reply than
+they expect and ignore what they do not know.
 
 ### `02` BEGIN
 
 | Field | Type | Meaning |
 |---|---|---|
 | size | `u28` | image size in bytes |
-| slot | `u7` | 1 – `slots`. 0 is reserved (see below) |
+| slot | `u7` | 1 – `slots`, or 127 for a new launcher (`LAUNCHER`). 0 is reserved (see below) |
 | name_len | `u7` | 1 – 16 |
 | name | `name_len` bytes | ASCII, see Names |
 
@@ -165,6 +173,7 @@ Fails with `NOT_STARTED` without a prior BEGIN, `BAD_OFFSET` if `offset` >
 | Field | Type | Meaning |
 |---|---|---|
 | crc32 | `u35` | CRC-32 of the whole image |
+| flags | `u7` | optional, only if the launcher has `STAY` (see Features). Bit 0: store only, do not start |
 
 The CRC is the standard IEEE 802.3 / zlib / PNG CRC-32 (reflected,
 polynomial `0xEDB88320`, initial value and final XOR `0xFFFFFFFF`), as
@@ -178,9 +187,11 @@ the last step, so it is final:
 1. Checks that all `size` bytes arrived (`INCOMPLETE`).
 2. Checks the CRC (`BAD_CRC`).
 3. Checks the image (`BAD_IMAGE`, see Image requirements).
-4. Writes the slot file and verifies it (`NO_CARD`, `WRITE_FAILED`).
+4. Writes the slot file and verifies it (`NO_CARD`, `WRITE_FAILED`,
+   `CARD_FULL`).
 
-On `OK`, the launcher boots the firmware right after replying. The client
+On `OK`, the launcher boots the firmware right after replying, unless
+the flags asked it to store only (then see `STAY` below). The client
 should then close the MIDI port. The launcher is gone, and the USB device
 disappears or changes as the new firmware starts.
 
@@ -192,8 +203,128 @@ and started. The client should say so rather than claim a failure.
 
 On any failure, nothing on the card has changed and the upload is still in
 memory. Problems with the image (`BAD_CRC`, `BAD_IMAGE`) need a new upload.
-Problems with the card (`NO_CARD`, `WRITE_FAILED`) can be fixed (insert the
-card) and END sent again.
+Problems with the card (`NO_CARD`, `WRITE_FAILED`, `CARD_FULL`) can be fixed
+(insert the card, make room) and END sent again. A write that fails part way
+leaves nothing behind on the card.
+
+## Features
+
+PING's last byte says what the launcher can do beyond the upload above. A
+client uses a feature only if its bit is set; an older launcher answers the
+commands below with `BAD_MESSAGE`, and END with a flags byte the same way.
+
+| Bit | Name | Meaning |
+|---|---|---|
+| 0 | `LIST` | `06 LIST` is there |
+| 1 | `CLEAR` | `07 CLEAR` is there |
+| 2 | `STAY` | END takes the flags byte |
+| 3 | `LAUNCHER` | BEGIN to slot 127 updates the launcher itself |
+| 4 | `RUN` | `05 RUN` is there (launchers with RUN but no features byte have it too) |
+
+The test launchers 1.4.0 – 1.4.2 had LIST and CLEAR at `05` and
+`06`; a client that wants to talk to them can tell them apart by
+`launcher_version` (missing on 1.4.0, which already had the features byte).
+
+### `STAY`: store without starting
+
+With bit 0 of END's flags set, the launcher stores the firmware as usual and
+then stays where it is. The picker shows the new key, and the launcher keeps
+listening, so the client can send the next firmware right away. If a fault
+was showing (no card, nothing on the card), the picker comes up as soon as
+there is a firmware to offer.
+
+An END resent after a lost reply stores the same image again, which is
+harmless.
+
+### `06` LIST
+
+| Field | Type | Meaning |
+|---|---|---|
+| slot | `u7` | 1 – `slots` |
+
+Reply `46`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| status | `u7` | |
+| slot | `u7` | the slot asked about |
+| name_len | `u7` | 0 – 40; 0 means the key is empty |
+| name | `name_len` bytes | the file's name in `/FIRMWARE`, e.g. `05_TAPE-DEV.bin` |
+| size | `u28` | its size in bytes |
+
+This is what the picker shows on that key, so it includes files without a
+number that filled a free key (`HMMM.bin`). Longer names are cut to 40
+characters, and anything outside printable ASCII comes as `?`. On failure
+(`BAD_SLOT`, `NO_CARD`) the reply is the status only.
+
+### `07` CLEAR
+
+| Field | Type | Meaning |
+|---|---|---|
+| slot | `u7` | 1 – `slots` |
+| name_len | `u7` | optional, 1 – 40 |
+| name | `name_len` bytes | the file LIST reported on that key |
+
+Reply `47`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| status | `u7` | |
+| slot | `u7` | the slot asked about |
+| removed | `u7` | `1` if something was removed, `0` if not |
+
+Removes every `NN_*` file of that slot from `/FIRMWARE`, and the file
+without a number sitting on that key if there is one, i.e. whatever LIST
+reported. An empty key is not an error. Afterwards a file without a number
+may move onto the freed key; LIST again to see the result.
+
+With a name, the key is emptied only if LIST would report exactly that name
+on it; otherwise nothing is removed and the reply is `OK` with `removed` 0.
+Clients should always send the name. A CLEAR resent after a slow reply would
+otherwise also remove a file without a number that moved onto the key in the
+meantime. On failure (`BAD_SLOT`, `NO_CARD`, `WRITE_FAILED`) the reply is the
+status only.
+
+### `LAUNCHER`: updating the launcher
+
+BEGIN with slot **127** (out of the range of keys; slot 0 is reserved) sends
+a new launcher instead of a firmware. The name is ignored but must follow
+the name rules; use `LAUNCHER`. DATA as usual. At END, besides the usual
+checks, the launcher:
+
+1. Checks that the image is a launcher: it must contain the text
+   `CHOMPI-LAUNCHER ` followed by its version, e.g. `CHOMPI-LAUNCHER 1.5.0`
+   (`NOT_LAUNCHER`). Launchers carry this tag from v1.5 on (and the test builds from 1.4.1).
+2. Refuses if the card root holds another `.bin` besides `CHOMPI.bin`
+   (`OTHER_BIN`): the bootloader installs the first `.bin` it finds, so the
+   new launcher might never be installed.
+3. Writes the image to a temporary file in `/FIRMWARE` and reads it back.
+4. Renames `/CHOMPI.bin` to `/CHOMPI.old` (replacing an older one) and the
+   temporary file to `/CHOMPI.bin`.
+5. Replies `OK`, then restarts. The bootloader finds a `CHOMPI.bin` that
+   differs from what it holds and installs it (a rainbow on the keys), then
+   starts it. The USB device goes away and comes back with the new launcher;
+   PING it to check `launcher_version`.
+
+The STAY flag is ignored. Any failure leaves the card and the running
+launcher as they were.
+
+Power loss is safe at every step: until the bootloader has installed the new
+`CHOMPI.bin`, it still holds the old launcher and starts that; if it is cut
+off while installing, the new file is still on the card and it tries again.
+If a new launcher turns out not to work, rename `CHOMPI.old` back to
+`CHOMPI.bin` on a computer.
+
+### Setting up several slots
+
+1. PING, and check `features`.
+2. LIST every slot to show the user what is there now.
+3. For each change: CLEAR, or BEGIN / DATA / END with `STAY`.
+4. LIST again to confirm.
+
+Storing over a slot does not touch a file without a number that was sitting
+on that key: it moves to the next free key. Clients that want it gone should
+CLEAR the slot first.
 
 ### `05` RUN
 
@@ -217,6 +348,7 @@ same buffer.
 
 Launchers from before RUN answer it with `BAD_MESSAGE`, like any unknown
 command, so a client can tell them apart without a new protocol version.
+Launchers with a features byte also say so in bit 4.
 If the reply is lost, a resend goes unanswered because the firmware has
 already started; no reply therefore most likely means it did.
 
@@ -236,6 +368,9 @@ already started; no reply therefore most likely means it did.
 | 9 | `BAD_NAME` | name is empty, too long, or has a forbidden character |
 | 10 | `NO_CARD` | no SD card, or it would not mount |
 | 11 | `WRITE_FAILED` | the card refused the write, or the readback mismatched |
+| 12 | `CARD_FULL` | no room on the card for the image |
+| 13 | `NOT_LAUNCHER` | slot 127, but the image has no launcher tag |
+| 14 | `OTHER_BIN` | slot 127, but another `.bin` in the card root would be installed instead |
 
 Clients should show unknown codes as a number rather than fail, since later
 versions may add more.
@@ -317,6 +452,7 @@ samples.
 |---|---|
 | reply to PING, BEGIN, DATA | expect within 300 ms. Resend after that, up to ~10 tries |
 | reply to END | allow 10 s (it writes and verifies ~250 KB on the card) |
+| reply to LIST, CLEAR | allow 2 s (they may have to mount the card first) |
 | reply to RUN | expect within 300 ms. Resend once at most; no reply most likely means it started |
 | gaps between messages | keep below 3 s, or the launcher may treat the upload as abandoned |
 
@@ -362,3 +498,8 @@ image: 00 00 02 20 01 19 00 24 FF 80      crc32 = 0x8966E0AF
 - Find the device by a port name containing `CHOMPI`, then confirm with
   PING.
 - Ignore any incoming message that is not a reply to what you just sent.
+- A reply can arrive late, after you have already resent. The launcher then
+  answers the resend too, and that second reply turns up while you wait for
+  the next message's. For LIST and CLEAR, check the slot in the reply and skip
+  replies for another slot. For DATA, continue from `received` as described
+  above.

@@ -168,6 +168,25 @@ Together with a firmware that can restart itself into the launcher, that
 switches firmwares from the computer alone, e.g. between a development build
 and the USB storage firmware.
 
+From v1.5 the launcher can also set up all keys in one go and update
+itself, which is what the setup page uses
+(https://ugrossek.github.io/CHOMPI/setup/): pick a firmware for each key,
+and the page writes them all. Over the same connection a host can
+
+- list what is on each key (`./midi-send.py --list`) and empty a key
+  (`--clear 5`), naming the file it saw there, so a slow reply can't take
+  something else that moved onto the key;
+- store a firmware without starting it (`--stay`), so the picker stays up
+  for the next one;
+- install a new launcher (`--launcher CHOMPI.bin`). It is written to
+  `/CHOMPI.bin` (the old one kept as `/CHOMPI.old`), and CHOMPI restarts so
+  the bootloader installs it, exactly as after copying it onto the card by
+  hand. A file that isn't a launcher, or another `.bin` at the top of the
+  card that the bootloader would take instead, is refused.
+
+Uploads go in 2048-byte messages (256 before v1.5), about 240 KB/s. A full
+card is reported as such, and a failed write leaves nothing behind.
+
 `midi-send.py` is Linux only and needs nothing beyond Python 3. For macOS and
 Windows there is a web page that does the same in Chrome or Edge:
 https://ugrossek.github.io/CHOMPI/ (source in [ugrossek/CHOMPI](https://github.com/ugrossek/CHOMPI/tree/midi-firmware-load/docs)). The protocol is

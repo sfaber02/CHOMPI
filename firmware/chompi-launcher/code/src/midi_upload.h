@@ -23,6 +23,9 @@
  *      06 LIST   slot                         -> 46 status slot name_len name
  *                                                    size:u28
  *      07 CLEAR  slot [name_len name]         -> 47 status slot removed
+ *      08 COLOR  slot r g b                   -> 48 status slot
+ *
+ *  LIST appends the key's colour, r g b, after the size (FEATURE_COLOR).
  *
  *  Test launchers 1.4.0 - 1.4.2 had LIST and CLEAR at 05 and 06.
  *
@@ -45,7 +48,7 @@
 #define CHOMPI_LAUNCHER_VERSION_PATCH 0
 #endif
 #define CHOMPI_LAUNCHER_VERSION_MAJOR 1
-#define CHOMPI_LAUNCHER_VERSION_MINOR 5
+#define CHOMPI_LAUNCHER_VERSION_MINOR 6
 #define CHOMPI_LAUNCHER_TAG_PREFIX "CHOMPI-LAUNCHER "
 #include "chainload.h"
 #include <cstring>
@@ -78,9 +81,10 @@ namespace chompi
             FEATURE_STAY  = 1 << 2, /**< END flag: store, do not start */
             FEATURE_LAUNCHER = 1 << 3, /**< slot 127: update the launcher */
             FEATURE_RUN   = 1 << 4, /**< 05 RUN */
+            FEATURE_COLOR = 1 << 5, /**< 08 COLOR, and LIST tells the colour */
         };
-        static constexpr uint8_t kFeatures
-            = FEATURE_LIST | FEATURE_CLEAR | FEATURE_STAY | FEATURE_LAUNCHER | FEATURE_RUN;
+        static constexpr uint8_t kFeatures = FEATURE_LIST | FEATURE_CLEAR | FEATURE_STAY
+                                           | FEATURE_LAUNCHER | FEATURE_RUN | FEATURE_COLOR;
 
         /** END's optional flags byte. */
         static constexpr uint8_t kEndStay = 1 << 0;
@@ -94,6 +98,7 @@ namespace chompi
             RUN   = 0x05,
             LIST  = 0x06,
             CLEAR = 0x07,
+            COLOR = 0x08,
             REPLY = 0x40, /**< or'd into the command being answered */
         };
 
@@ -130,6 +135,7 @@ namespace chompi
             List,     /**< LIST awaits FinishList() */
             Clear,    /**< CLEAR awaits FinishClear() */
             Run,      /**< RUN for RunSlot(); awaits FinishRun() */
+            Color,    /**< COLOR for Slot(); awaits FinishColor() */
         };
 
         /** Start USB MIDI and begin listening.
@@ -188,21 +194,42 @@ namespace chompi
         }
 
         /** Answer LIST for Slot(): what is on that key, or name "" if
-         *  nothing. Characters outside printable ASCII are sent as '?'. */
-        void FinishList(Status s, const char *name, uint32_t size)
+         *  nothing, and the colour it shows (7 bits each, 0 0 0 if dark).
+         *  Characters outside printable ASCII are sent as '?'. */
+        void FinishList(Status s, const char *name, uint32_t size,
+                        const uint8_t rgb[3])
         {
             if (s != OK)
             {
                 ReplyStatus(LIST, s);
                 return;
             }
-            uint8_t p[2 + 1 + kMaxListName + 4] = {s, query_slot_};
+            uint8_t p[2 + 1 + kMaxListName + 4 + 3] = {s, query_slot_};
             const size_t len = ListName(name, p + 3);
             p[2] = (uint8_t)len;
             Put7(p + 3 + len, size, 4);
+            for (int i = 0; i < 3; i++)
+                p[3 + len + 4 + i] = rgb[i] & 0x7F;
             last_status_ = s;
-            Reply(LIST, p, 3 + len + 4);
+            Reply(LIST, p, 3 + len + 4 + 3);
         }
+
+        /** Answer COLOR: OK once the colour is on the card, BAD_SLOT if the
+         *  key is empty. */
+        void FinishColor(Status s)
+        {
+            if (s != OK)
+            {
+                ReplyStatus(COLOR, s);
+                return;
+            }
+            const uint8_t p[2] = {s, query_slot_};
+            last_status_       = s;
+            Reply(COLOR, p, sizeof(p));
+        }
+
+        /** COLOR's colour, 7 bits per channel. All 0 means "none chosen". */
+        const uint8_t *Color() const { return color_; }
 
         /** Whether CLEAR may remove `name`, the file on Slot()'s key: yes if
          *  the CLEAR named no file, or named this one as LIST reports it. */
@@ -239,7 +266,7 @@ namespace chompi
         uint32_t    Received() const { return received_; }
         uint32_t    Total() const { return total_; }
         uint32_t    Crc() const { return crc_; }
-        /** The upload's slot, or for List/Clear the slot asked about. */
+        /** The upload's slot, or for List/Clear/Color the slot asked about. */
         uint8_t     Slot() const { return query_slot_ ? query_slot_ : slot_; }
         uint8_t     RunSlot() const { return run_slot_; }
         const char *Name() const { return name_; }
@@ -541,6 +568,17 @@ namespace chompi
                     return Event::Clear;
                 }
 
+                case COLOR:
+                {
+                    if (blen != 4)
+                        return Fail(cmd, BAD_MESSAGE);
+                    if (body[0] < 1 || body[0] > slots_)
+                        return Fail(cmd, BAD_SLOT);
+                    memcpy(color_, body + 1, 3);
+                    query_slot_ = body[0];
+                    return Event::Color;
+                }
+
                 case RUN:
                 {
                     if (blen != 1)
@@ -571,7 +609,8 @@ namespace chompi
         uint32_t last_heard_  = 0;
         uint32_t crc_         = 0;
         uint8_t  slot_        = 0;
-        uint8_t  query_slot_  = 0; /**< LIST/CLEAR's slot until answered */
+        uint8_t  query_slot_  = 0; /**< LIST/CLEAR/COLOR's slot until answered */
+        uint8_t  color_[3]    = {};
         uint8_t  end_flags_   = 0;
         bool     stored_      = false; /**< END answered OK */
         bool     clear_name_given_ = false;

@@ -17,6 +17,9 @@
  *  several slots in one go asks to store only; the launcher then stays in the
  *  picker, and the host can also list and clear slots, or start one that is
  *  already on the card (RUN), as its key would.
+ *
+ *  Each key breathes in its own colour: the one the host chose for it (COLOR,
+ *  kept in /FIRMWARE/key_colors.txt), or else one made from the file's name.
  */
 #include "daisy_seed.h"
 #include "hardware.h"
@@ -72,6 +75,8 @@ struct Slot
 {
     char name[64];
     uint32_t size;
+    uint8_t  rgb[3]; /**< the key's colour, 8 bits per channel */
+    bool     chosen; /**< rgb came from key_colors.txt, not from the name */
 };
 
 static Slot slots[kMaxSlots];
@@ -220,6 +225,153 @@ static int SlotFromName(const char *name)
     return n >= 1 && n <= kMaxSlots ? n : 0;
 }
 
+/* ------------------------------------------------------------------------
+ *  Key colours
+ *
+ *  A host that knows what it put on the card (the setup page) also says what
+ *  colour each key should be, and the picker breathes in it. They are kept in
+ *  a text file next to the firmwares, one line per key:
+ *
+ *      05 FF9431 05_FRIZZ.bin
+ *
+ *  A colour belongs to the file named on its line. Once the key holds another
+ *  file -- replaced by hand, or by a host that does not know about colours --
+ *  the line no longer applies, and the key gets a colour made from its file's
+ *  name instead: the same name always gives the same colour. */
+
+static const char *kColorFile = "FIRMWARE/key_colors.txt";
+static const char *kColorTemp = "FIRMWARE/key_colors.tmp";
+
+/** A colour from the firmware's name, ignoring the NN_ prefix, the .bin and
+ *  upper/lower case: "05_FRIZZ.bin" and "FRIZZ.BIN" match. Full saturation,
+ *  hue from a hash of the name. */
+static void NameColor(const char *name, uint8_t rgb[3])
+{
+    if (SlotFromName(name))
+        name += 3;
+    size_t len = strlen(name);
+    if (HasBinExtension(name))
+        len -= 4;
+
+    uint32_t h = 2166136261u; /* FNV-1a */
+    for (size_t i = 0; i < len; i++)
+    {
+        char c = name[i];
+        if (c >= 'a' && c <= 'z')
+            c -= 'a' - 'A';
+        h = (h ^ (uint8_t)c) * 16777619u;
+    }
+
+    /* Hue around the wheel in 6 sectors of 256 steps. */
+    const uint32_t hue = h % 1536, sector = hue / 256, f = hue % 256;
+    const uint8_t  up = (uint8_t)f, down = (uint8_t)(255 - f);
+    static const uint8_t kMax = 255;
+    switch (sector)
+    {
+        case 0: rgb[0] = kMax; rgb[1] = up;   rgb[2] = 0;    break;
+        case 1: rgb[0] = down; rgb[1] = kMax; rgb[2] = 0;    break;
+        case 2: rgb[0] = 0;    rgb[1] = kMax; rgb[2] = up;   break;
+        case 3: rgb[0] = 0;    rgb[1] = down; rgb[2] = kMax; break;
+        case 4: rgb[0] = up;   rgb[1] = 0;    rgb[2] = kMax; break;
+        default: rgb[0] = kMax; rgb[1] = 0;   rgb[2] = down; break;
+    }
+}
+
+static int HexDigit(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+/** Colour every key: from key_colors.txt where its line still names the
+ *  file on the key, from the file's name otherwise. */
+static void LoadColors()
+{
+    for (int i = 0; i < kMaxSlots; i++)
+    {
+        slots[i].chosen = false;
+        if (slots[i].size)
+            NameColor(slots[i].name, slots[i].rgb);
+    }
+
+    static FIL  f;
+    static char __attribute__((aligned(32))) text[2048];
+    UINT        got = 0;
+    if (f_open(&f, kColorFile, FA_OPEN_EXISTING | FA_READ) != FR_OK)
+        return;
+    const FRESULT res = f_read(&f, text, sizeof(text) - 1, &got);
+    f_close(&f);
+    if (res != FR_OK)
+        return;
+    text[got] = '\0';
+
+    /* "NN RRGGBB name", anything else (a # comment, a typo) is skipped. */
+    for (char *line = text; *line;)
+    {
+        char *end = line + strcspn(line, "\r\n");
+        const char next = *end;
+        *end = '\0';
+
+        int digits[6] = {};
+        bool ok = line[0] >= '0' && line[0] <= '9' && line[1] >= '0'
+                  && line[1] <= '9' && line[2] == ' ' && strlen(line) > 10
+                  && line[9] == ' ';
+        for (int i = 0; ok && i < 6; i++)
+            ok = (digits[i] = HexDigit(line[3 + i])) >= 0;
+        const int key = ok ? (line[0] - '0') * 10 + (line[1] - '0') : 0;
+        if (key >= 1 && key <= kMaxSlots && slots[key - 1].size
+           && strcasecmp(line + 10, slots[key - 1].name) == 0)
+        {
+            Slot &s = slots[key - 1];
+            for (int i = 0; i < 3; i++)
+                s.rgb[i] = (uint8_t)(digits[2 * i] * 16 + digits[2 * i + 1]);
+            s.chosen = true;
+        }
+
+        line = next ? end + 1 : end;
+    }
+}
+
+/** Write key_colors.txt for the chosen colours, through a temporary file so
+ *  a failed write leaves the old one. */
+static bool SaveColors()
+{
+    static FIL  f;
+    static char __attribute__((aligned(32))) text[kMaxSlots * 96 + 256];
+    int n = snprintf(text, sizeof(text),
+                     "# The colour of each key in the launcher: key, RRGGBB, the file it is for.\r\n"
+                     "# Written by the setup page; a key not listed gets a colour from its name.\r\n");
+    for (int i = 0; i < kMaxSlots; i++)
+        if (slots[i].size && slots[i].chosen)
+            n += snprintf(text + n, sizeof(text) - n, "%02d %02X%02X%02X %s\r\n", i + 1,
+                          slots[i].rgb[0], slots[i].rgb[1], slots[i].rgb[2],
+                          slots[i].name);
+
+    UINT    put = 0;
+    FRESULT res = f_open(&f, kColorTemp, FA_CREATE_ALWAYS | FA_WRITE);
+    if (res == FR_OK)
+    {
+        res = f_write(&f, text, (UINT)n, &put);
+        const FRESULT closed = f_close(&f);
+        if (res == FR_OK)
+            res = put == (UINT)n ? closed : FR_DENIED;
+    }
+    if (res == FR_OK)
+    {
+        f_unlink(kColorFile);
+        res = f_rename(kColorTemp, kColorFile);
+    }
+    Log("colours: saved, %d -> %d", n, (int)res);
+    if (res != FR_OK)
+        f_unlink(kColorTemp);
+    return res == FR_OK;
+}
+
 /** Put the .bin files from /FIRMWARE on keys. NN_NAME.bin goes on key NN, so
  *  a firmware stays on its key no matter what else is on the card -- the
  *  same slot number a USB upload names. Files without a prefix (or whose key
@@ -325,6 +477,7 @@ static void ScanFirmwares(bool verbose = true)
     for (int i = 0; i < kMaxSlots; i++)
         slot_count += slots[i].size ? 1 : 0;
     Log("directory walk saw %d entries, %d on keys", seen, slot_count);
+    LoadColors();
 }
 
 /* Settings are each firmware's own business.
@@ -703,8 +856,17 @@ static void ShutdownPeripherals();
     for (;;) {}
 }
 
-/** Breathing white on every populated key. Unpopulated keys stay dark, so the
- *  number of lit keys is the number of firmwares you have. */
+/** The LED level for one channel of a key's colour. Squared: the LEDs are
+ *  linear, the colours are chosen on a screen, and without it every colour
+ *  but the purest washes out towards white. */
+static float LedLevel(uint8_t c)
+{
+    const float v = c / 255.f;
+    return v * v;
+}
+
+/** Every populated key breathing in its colour. Unpopulated keys stay dark,
+ *  so the number of lit keys is the number of firmwares you have. */
 static void DrawPicker(uint32_t now)
 {
     /* ~2 s cycle, never fully dark so a slot is always readable. */
@@ -719,20 +881,24 @@ static void DrawPicker(uint32_t now)
 
     for (int i = 0; i < kMaxSlots; i++)
         if (slots[i].size)
-            SetSmtLedFloat(kSlotLed[i], level, level, level);
+            SetSmtLedFloat(kSlotLed[i], level * LedLevel(slots[i].rgb[0]),
+                           level * LedLevel(slots[i].rgb[1]),
+                           level * LedLevel(slots[i].rgb[2]));
 
     fill_led_data();
 }
 
-/** Confirmation flash on the chosen key, so a press always feels acknowledged
- *  even though loading is quick. */
+/** Confirmation flash on the chosen key, in its colour, so a press always
+ *  feels acknowledged even though loading is quick. */
 static void FlashChoice(int index)
 {
+    const uint8_t *rgb = slots[index].rgb;
     for (int pulse = 0; pulse < 3; pulse++)
     {
         for (int i = 0; i < kNumSmtLeds; i++)
             SetSmtLed(i, 0, 0, 0);
-        SetSmtLedFloat(kSlotLed[index], 1.f, 1.f, 1.f);
+        SetSmtLedFloat(kSlotLed[index], LedLevel(rgb[0]), LedLevel(rgb[1]),
+                       LedLevel(rgb[2]));
         fill_led_data();
         System::Delay(60);
 
@@ -744,7 +910,8 @@ static void FlashChoice(int index)
     /* Leave it lit through the load. Dark would be indistinguishable from a
        dead unit, and a slow read is exactly when you most want to know the
        difference. */
-    SetSmtLedFloat(kSlotLed[index], 1.f, 1.f, 1.f);
+    SetSmtLedFloat(kSlotLed[index], LedLevel(rgb[0]), LedLevel(rgb[1]),
+                   LedLevel(rgb[2]));
     fill_led_data();
 }
 
@@ -1131,13 +1298,45 @@ static void ServiceUsb(uint32_t now)
 
         case MidiUpload::Event::List:
         {
+            const int     s     = upload.Slot() - 1;
+            const uint8_t rgb[3] = {(uint8_t)(slots[s].rgb[0] >> 1),
+                                    (uint8_t)(slots[s].rgb[1] >> 1),
+                                    (uint8_t)(slots[s].rgb[2] >> 1)};
+            static const uint8_t kDark[3] = {};
+            if (!EnsureCard())
+                upload.FinishList(MidiUpload::NO_CARD, nullptr, 0, kDark);
+            else if (slots[s].size)
+                upload.FinishList(MidiUpload::OK, slots[s].name, slots[s].size, rgb);
+            else
+                upload.FinishList(MidiUpload::OK, "", 0, kDark);
+            break;
+        }
+
+        case MidiUpload::Event::Color:
+        {
             const int s = upload.Slot() - 1;
             if (!EnsureCard())
-                upload.FinishList(MidiUpload::NO_CARD, nullptr, 0);
-            else if (slots[s].size)
-                upload.FinishList(MidiUpload::OK, slots[s].name, slots[s].size);
+            {
+                upload.FinishColor(MidiUpload::NO_CARD);
+                break;
+            }
+            if (!slots[s].size)
+            {
+                upload.FinishColor(MidiUpload::BAD_SLOT);
+                break;
+            }
+            /* 7 bits over the wire, 8 on the card and the LEDs. 0 0 0 forgets
+               the choice: back to the colour from the name. */
+            const uint8_t *c = upload.Color();
+            slots[s].chosen  = c[0] || c[1] || c[2];
+            if (slots[s].chosen)
+                for (int i = 0; i < 3; i++)
+                    slots[s].rgb[i] = (uint8_t)((c[i] << 1) | (c[i] >> 6));
             else
-                upload.FinishList(MidiUpload::OK, "", 0);
+                NameColor(slots[s].name, slots[s].rgb);
+            Log("usb: colour key %d -> %02X%02X%02X", s + 1, slots[s].rgb[0],
+                slots[s].rgb[1], slots[s].rgb[2]);
+            upload.FinishColor(SaveColors() ? MidiUpload::OK : MidiUpload::WRITE_FAILED);
             break;
         }
 

@@ -2,7 +2,8 @@
 
 **Protocol version 1.** Launcher v1.1 brought PING, BEGIN, DATA and END;
 v1.5 adds the features below (LIST, CLEAR, STAY, the launcher's own update)
-and RUN. Additions keep version 1: clients find them in PING's features byte.
+and RUN, v1.6 key colours (COLOR). Additions keep version 1: clients find
+them in PING's features byte.
 
 This describes how a host program sends a firmware image to the CHOMPI
 launcher over USB MIDI and stores it in a slot on the SD card. It is meant
@@ -220,6 +221,7 @@ commands below with `BAD_MESSAGE`, and END with a flags byte the same way.
 | 2 | `STAY` | END takes the flags byte |
 | 3 | `LAUNCHER` | BEGIN to slot 127 updates the launcher itself |
 | 4 | `RUN` | `05 RUN` is there (launchers with RUN but no features byte have it too) |
+| 5 | `COLOR` | `08 COLOR` is there, and LIST replies end with the key's colour |
 
 The test launchers 1.4.0 – 1.4.2 had LIST and CLEAR at `05` and
 `06`; a client that wants to talk to them can tell them apart by
@@ -251,6 +253,7 @@ Reply `46`:
 | name_len | `u7` | 0 – 40; 0 means the key is empty |
 | name | `name_len` bytes | the file's name in `/FIRMWARE`, e.g. `05_TAPE-DEV.bin` |
 | size | `u28` | its size in bytes |
+| r, g, b | 3 × `u7` | only with `COLOR`: the colour the key breathes in, 0 0 0 if empty |
 
 This is what the picker shows on that key, so it includes files without a
 number that filled a free key (`HMMM.bin`). Longer names are cut to 40
@@ -284,6 +287,39 @@ Clients should always send the name. A CLEAR resent after a slow reply would
 otherwise also remove a file without a number that moved onto the key in the
 meantime. On failure (`BAD_SLOT`, `NO_CARD`, `WRITE_FAILED`) the reply is the
 status only.
+
+### `08` COLOR
+
+| Field | Type | Meaning |
+|---|---|---|
+| slot | `u7` | 1 – `slots` |
+| r, g, b | 3 × `u7` | the colour, 0 – 127 per channel; 0 0 0 for the default |
+
+Reply `48`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| status | `u7` | |
+| slot | `u7` | the slot asked about |
+
+Sets the colour the key breathes in the picker. Each channel is the top 7
+bits of an ordinary 8-bit screen colour (`#FF9431` is sent as `7F 4A 18`);
+the launcher brightens it back to 8 bits and adjusts it for the LEDs. The
+colour belongs to the file on the key at that moment and is kept on the card
+in `/FIRMWARE/key_colors.txt`, one line per key:
+
+```
+05 FF9431 05_FRIZZ.bin
+```
+
+The file is plain text and may be edited by hand. Once a key holds another
+file (written over by a client that sets no colour, cleared, or changed by
+hand), its line no longer applies. A key without a colour of its own gets
+one made from its file's name, ignoring the `NN_` prefix, `.bin` and case,
+so a firmware keeps that colour on any key. `0 0 0` goes back to it.
+
+Fails with `BAD_SLOT` if the key is empty, `NO_CARD`, or `WRITE_FAILED`; the
+reply is then the status only. Send COLOR after the firmware is on the key.
 
 ### `LAUNCHER`: updating the launcher
 
@@ -320,7 +356,8 @@ If a new launcher turns out not to work, rename `CHOMPI.old` back to
 1. PING, and check `features`.
 2. LIST every slot to show the user what is there now.
 3. For each change: CLEAR, or BEGIN / DATA / END with `STAY`.
-4. LIST again to confirm.
+4. With `COLOR`: COLOR every key whose colour should change.
+5. LIST again to confirm.
 
 Storing over a slot does not touch a file without a number that was sitting
 on that key: it moves to the next free key. Clients that want it gone should

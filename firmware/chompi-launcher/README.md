@@ -20,7 +20,7 @@ possible for one app to start another.
 The launcher is an ordinary app living in QSPI. On boot it:
 
 1. Mounts the card and scans `/FIRMWARE` for `.bin` files.
-2. Lights the white key under each one and waits for a press.
+2. Lights the white key under each one, in that firmware's colour, and waits for a press.
 3. Reads the chosen image into SDRAM (64MB available; an image is ~250KB).
 4. Validates the image's vector table before committing to it.
 5. Tears down the peripherals, then resets into the chosen firmware.
@@ -215,9 +215,15 @@ with `make CHOMPI_LIBS=/path/to/libs`.
 
 ## LED feedback
 
+Each key in the picker has its own colour. The setup page sets them to match
+the colours it shows (`08 COLOR`, see PROTOCOL.md), and keeps them in
+`/FIRMWARE/key_colors.txt`. A key without one gets a colour made from its
+firmware's name, so the same firmware always looks the same.
+`./midi-send.py --color 5 FF9431` sets one by hand.
+
 | Pattern | Meaning |
 |---|---|
-| White keys breathing | Picker. One lit key per firmware found. |
+| Keys breathing in colour | Picker. One lit key per firmware found. |
 | Chosen key flashes 3×, then stays lit | Selection acknowledged, loading. |
 | Keybed filling left to right | Read progress. Distinguishes a slow read from a dead unit. |
 | Slow **red** pulse | No card, or it would not mount. |

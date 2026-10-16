@@ -208,9 +208,86 @@ namespace chompi
             MpReadAll();
         }
 
-        void BMCMediumBattCheck()
+        /** Battery meter on the keys (hold the volume knob's click 2 s to turn it on or off). There's no battery voltage to read: the MP2722's BATT_LOW comparator (REG0C bits 3:2, 3.0 to
+         *  3.3 V; 3.1 and 3.2 inferred between the two settings TAPE used) is swept every 2 s, back at 3.0 V for
+         *  200 ms between steps, so the lockout (8 lows in a row, 20 ms apart) can't be set off by a sweep */
+        bool batt_meter = false;
+        uint8_t batt_band = 4;   // 0: < 3.0 V, 1: 3.0-3.1, 2: 3.1-3.2, 3: 3.2-3.3, 4: > 3.3
+        uint8_t meter_step_ = 0, meter_lows_ = 0;
+        uint32_t meter_t_ = 0;
+        void BattMeterTick() __attribute__((optimize("Os")))
         {
-            if(batt_level == BatteryLevel::FULL)
+            static const uint8_t kBattLowReg[4] = {0B01010001, 0B01010101, 0B01011001, 0B01011101}; // 3.0-3.3 V
+            const uint32_t now = System::GetNow();
+            // steps: 0 idle; then for each of 3.3, 3.2, 3.1 V: set it (odd), read it 40 ms on and go back to
+            // 3.0 V (even), 200 ms there
+            if(meter_step_ == 0)
+            {
+                if(now - meter_t_ < 2000)
+                    return;
+                meter_lows_ = 0;
+                meter_step_ = 1;
+            }
+            const uint8_t k = (meter_step_ - 1) / 2; // 0: 3.3, 1: 3.2, 2: 3.1
+            if(meter_step_ % 2 == 1)
+            {
+                if(meter_step_ > 1 && now - meter_t_ < 200)
+                    return;
+                MpWrite(0x0c, kBattLowReg[3 - k]);
+                meter_t_ = now;
+                meter_step_++;
+            }
+            else if(now - meter_t_ >= 40)
+            {
+                if(mp_buff_[5] >> 4 & 1)
+                    meter_lows_ |= 1 << k;
+                MpWrite(0x0c, kBattLowReg[0]);
+                meter_t_ = now;
+                meter_step_ = meter_step_ == 6 ? 0 : meter_step_ + 1;
+                if(meter_step_ == 0) // done: the band, from the lowest threshold it's under
+                {
+                    const bool low30 = batt_low_bounce & 1;
+                    batt_band = low30 ? 0 : (meter_lows_ & 4) ? 1 : (meter_lows_ & 2) ? 2 : (meter_lows_ & 1) ? 3 : 4;
+                    if(batt_level != BatteryLevel::FULL)
+                        batt_level = batt_band == 4 ? BatteryLevel::HIGH : BatteryLevel::MEDIUM;
+                }
+            }
+        }
+        inline bool VinGood() const { return vin_gd_bounce & 1; }
+        inline bool InputLimited() const { return iindpm_stat_bounce & 1; }
+        inline uint8_t ChargeStat() const { return (mp_buff_[2] >> 5) & 0B111; }
+        /** the meter, over whatever the keys show: white keys 1-5 the voltage (1 lit red: under 3.0 V, to 5 lit
+         *  green: over 3.3), key 7 USB power (green), key 9 charging (off none, blue trickle / pre-charge, orange
+         *  constant current, yellow constant voltage, white full), key 11 the input current-limited (red: the
+         *  source can't keep up, so the battery helps out; dim green: it can) */
+        void DrawBattMeter() __attribute__((optimize("Os")))
+        {
+            if(!batt_meter)
+                return;
+            static const uint8_t kBand[5][3] = {{255, 0, 0}, {255, 100, 0}, {255, 230, 0}, {150, 255, 0}, {0, 255, 0}};
+            static const uint8_t kChg[8][3] = {{0, 0, 0}, {0, 0, 255}, {0, 0, 255}, {255, 100, 0}, {255, 230, 0},
+                                               {255, 255, 255}, {0, 0, 0}, {0, 0, 0}};
+            static const uint8_t kOff[3] = {0, 0, 0}, kGreen[3] = {0, 255, 0}, kDimRed[3] = {40, 0, 0},
+                                 kRed[3] = {255, 0, 0}, kDimGreen[3] = {0, 40, 0};
+            const bool usb = VinGood();
+            for(int i = 1; i <= 15; i++)
+            {
+                const uint8_t* c = kOff;
+                if(i <= 5)
+                    c = i <= batt_band + 1 ? kBand[batt_band] : kOff;
+                else if(i == 7)
+                    c = usb ? kGreen : kDimRed;
+                else if(i == 9)
+                    c = kChg[ChargeStat()];
+                else if(i == 11 && usb)
+                    c = InputLimited() ? kRed : kDimGreen;
+                SetSmtLed(25 - i, c[0], c[1], c[2]);
+            }
+        }
+
+        void BMCMediumBattCheck() __attribute__((optimize("Os")))
+        {
+            if(batt_level == BatteryLevel::FULL || batt_meter) // (the meter's sweep does it then)
                 return;
 
             uint32_t now = System::GetNow();
@@ -252,12 +329,15 @@ namespace chompi
 
         uint32_t batt_level_checkt;
         uint32_t batt_fullt;
-        void LowBatteryLockoutCheck()
+        void LowBatteryLockoutCheck() __attribute__((optimize("Os"))) // (for size: it runs every 20 ms)
         {
             #if NO_BATT
                 return;
             #endif 
 
+            // (before the read: the last one, 20 ms ago, is done, so its write can't land on a transfer)
+            if(batt_meter || meter_step_ != 0) // (a sweep under way finishes, putting 3.0 V back)
+                BattMeterTick();
             BMCPerformCheck();
 
             if(batt_low_bounce == 0xff && vin_gd_bounce == 0x00) // unplugged and low battery

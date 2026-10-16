@@ -400,6 +400,7 @@ namespace chompi
                 SetSmtLedFloat(mode, key_color[0], key_color[1], key_color[2]);
             else
                 SetSmtLedFloat(mode, 0.f, 0.f, 0.f);
+            hw_->DrawBattMeter();
 
             // ========   send the data   =========
             fill_led_data();

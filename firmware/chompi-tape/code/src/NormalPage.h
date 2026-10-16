@@ -665,6 +665,7 @@ namespace chompi
             } 
 
             SetPthLedFloat(led_map[5], r, g, b);
+            hw_->DrawBattMeter();
 
             // ========   send the data   =========
             fill_led_data();
@@ -712,6 +713,8 @@ namespace chompi
                     knob_page[knob]++;
                     knob_page[knob] %= knob_num_pages[knob];
                 }
+                else if(!rising) // held 2 s: the battery meter on the keys on / off
+                    hw_->batt_meter = !hw_->batt_meter;
 
                 batt_hold = System::GetNow();
                 batt_display = rising;
